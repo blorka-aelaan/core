@@ -1,0 +1,31 @@
+# Arşiv ve loglar — rotasyonla yönetilir, depoya girmez
+arsiv/
+*.jsonl
+!journal.jsonl
+journal.jsonl
+
+# Loglar
+ag.log
+*.log
+
+# Kutular (üretim çıktısı, sürükle kontrolü)
+kutular/
+
+# Dünya — canlı organizmanın çalışma alanı (dosyalar oluşur/silinir)
+world/
+
+# Beyin/durum dosyaları (canlı durum)
+zeka/
+body.json
+ag_kapsam.json
+damak_rapor.json
+gorev.json
+
+# Node
+web/node_modules/
+web/dist/
+
+# Python
+__pycache__/
+*.pyc
+*.bak

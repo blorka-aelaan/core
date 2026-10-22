@@ -1,0 +1,146 @@
+{
+  "toplam_kayit": 60000,
+  "toplam_oturum": 29276,
+  "tip": {
+    "DOSYA_SAY": {
+      "oturum": 14587,
+      "oturum_basari": 0.7439,
+      "wc_ilk": 0.0889,
+      "bilinen_yol": 0.9105,
+      "israf": 0.1489,
+      "ilk_karisim": {
+        "ls": 8343,
+        "find": 4744,
+        "wc": 1297,
+        "head": 195
+      }
+    },
+    "SUREC_SAY": {
+      "oturum": 14689,
+      "oturum_basari": 0.8827,
+      "wc_ilk": 0.0799,
+      "bilinen_yol": 0.9197,
+      "israf": 0.1208,
+      "ilk_karisim": {
+        "ps": 7098,
+        "pgrep": 6264,
+        "wc": 1173,
+        "head": 147
+      }
+    }
+  },
+  "yol_basari": {
+    "ls->find": {
+      "basari": 0.0,
+      "n": 518
+    },
+    "ps->wc": {
+      "basari": 0.9983,
+      "n": 5894
+    },
+    "ps->ps": {
+      "basari": 0.0,
+      "n": 376
+    },
+    "pgrep->wc": {
+      "basari": 0.9994,
+      "n": 5177
+    },
+    "head->ps": {
+      "basari": 0.0,
+      "n": 87
+    },
+    "ls->wc": {
+      "basari": 0.9343,
+      "n": 6702
+    },
+    "head->wc": {
+      "basari": 0.0,
+      "n": 29
+    },
+    "find->wc": {
+      "basari": 0.9984,
+      "n": 3745
+    },
+    "head->ls": {
+      "basari": 0.0,
+      "n": 32
+    },
+    "ps->pgrep": {
+      "basari": 0.0,
+      "n": 357
+    },
+    "wc->wc": {
+      "basari": 0.3841,
+      "n": 1968
+    },
+    "ls->ls": {
+      "basari": 0.0,
+      "n": 500
+    },
+    "wc->find": {
+      "basari": 0.0,
+      "n": 107
+    },
+    "ls->head": {
+      "basari": 0.0,
+      "n": 54
+    },
+    "pgrep->pgrep": {
+      "basari": 0.0,
+      "n": 329
+    },
+    "ps->head": {
+      "basari": 0.0,
+      "n": 40
+    },
+    "pgrep->ps": {
+      "basari": 0.0,
+      "n": 316
+    },
+    "find->find": {
+      "basari": 0.0,
+      "n": 370
+    },
+    "head->head": {
+      "basari": 0.0,
+      "n": 35
+    },
+    "pgrep->head": {
+      "basari": 0.0,
+      "n": 30
+    },
+    "wc->head": {
+      "basari": 0.0,
+      "n": 23
+    },
+    "head->pgrep": {
+      "basari": 0.0,
+      "n": 23
+    },
+    "find->ls": {
+      "basari": 0.0,
+      "n": 266
+    },
+    "head->find": {
+      "basari": 0.0,
+      "n": 100
+    },
+    "find->head": {
+      "basari": 0.0,
+      "n": 12
+    },
+    "wc->ls": {
+      "basari": 0.0,
+      "n": 107
+    },
+    "wc->pgrep": {
+      "basari": 0.0,
+      "n": 56
+    },
+    "wc->ps": {
+      "basari": 0.0,
+      "n": 63
+    }
+  }
+}

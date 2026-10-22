@@ -1,0 +1,36 @@
+{
+  "kutu": {
+    "dir": "kutular",
+    "kutu_sayisi": 20,
+    "derinlikler": [1, 2, 3],
+    "govde_uzunluklar": [7, 8, 9],
+    "govde_tipleri": ["sayi", "harf"],
+    "sonek": "_emr",
+    "seed": 42
+  },
+  "kural": {
+    "varsayilan_odul": 10,
+    "kurallar": [
+      {"uzunluk": 8, "odul": -50},
+      {"tip": "sayi", "uzunluk": 7, "odul": 6},
+      {"tip": "harf", "uzunluk": 7, "odul": 15},
+      {"tip": "sayi", "uzunluk": 9, "odul": 30},
+      {"tip": "harf", "uzunluk": 9, "odul": 60}
+    ]
+  },
+  "console_costs": {
+    "ls": 1,
+    "cat": 2,
+    "head": 2,
+    "wc": 2,
+    "grep": 3,
+    "find": 4
+  },
+  "damak_canli_lr": 0.25,
+  "notlar": [
+    "kurallar siralidir: ilk eslesen kural odulu verir, hicbiri eslesmezse varsayilan_odul",
+    "TUZAK (F evresi): uzunluk 8 → -50 (sayi/harf farketmez); derinlikle carpilir (d=3 → -150)",
+    "esikli kural ornegi: {\"rakam_toplam\": {\"min\": 20}, \"odul\": 4}",
+    "console_costs: komut bazli enerji maliyeti; islenmeyen komutlar varsayilan 2"
+  ]
+}
