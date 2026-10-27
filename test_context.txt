@@ -1,0 +1,14 @@
+TEHLİKE durumunda:
+  mevcut_hedef: keşif
+  hedef_talimat: ['keşif']
+
+ACIKLUK durumunda:
+  mevcut_hedef: keşif
+  hedef_talimat: ['keşif']
+
+RAHATLAMA durumunda:
+  mevcut_hedef: keşif
+  hedef_talimat: ['keşif']
+
+Sıkılma testi (300 tick aynı hedef):
+  300 tick sonra mevcut_hedef: keşif

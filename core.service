@@ -1,0 +1,25 @@
+[Unit]
+Description=CORE — yaşayan organizma (main.py)
+Documentation=file:///home/emrah/Genel/core/README.md
+# ag.py gözlemcisi varsa bekle; yoksa yine de başla (organizma ag'siz yaşar).
+Wants=core-ag.service
+After=core-ag.service network.target
+
+[Service]
+Type=simple
+User=emrah
+WorkingDirectory=/home/emrah/Genel/core
+ExecStart=/usr/bin/python3 /home/emrah/Genel/core/main.py
+# Token ortam değişkeniyle güvenli şekilde ilet (body.json'a yazmaya gerek yok).
+# EnvironmentFile=/home/emrah/Genel/core/.env   # CORE_TOKEN=... satırı eklenebilir
+# Ctrl+C (SIGINT) → uyku modu; SIGTERM → doğal kapanış.
+KillSignal=SIGINT
+# Çökerse 15 saniye sonra yeniden başlat.
+Restart=on-failure
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=core
+
+[Install]
+WantedBy=multi-user.target

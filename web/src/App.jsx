@@ -54,8 +54,12 @@ export default function App() {
     if (!window.confirm(`${etiket}?\n(Temiz sinyal → systemd geri getirir.)`)) {
       return;
     }
-    const r = await post("/manage", { action });
-    setNot(r.ok ? `✓ ${etiket} — ${r.not}` : `HATA: ${r.cikti || r.hata}`);
+    try {
+      const r = await post("/manage", { action });
+      setNot(r.ok ? `✓ ${etiket} — ${r.not}` : `HATA: ${r.cikti || r.hata}`);
+    } catch (e) {
+      setNot(`HATA: ${e?.message || e}`);
+    }
     setTimeout(() => setNot(null), 8000);
   }
 

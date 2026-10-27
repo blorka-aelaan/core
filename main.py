@@ -21,6 +21,7 @@ import atolye as atolye_mod
 import damak as damak_mod
 import door as door_mod
 import drives as drives_mod
+import meta_ogrenme as meta_ogrenme_mod
 import gorev as gorev_mod
 import guvenlik as guvenlik_mod
 import journal as journal_mod
@@ -31,6 +32,9 @@ import surec as surec_mod
 import uyku as uyku_mod
 import zeka
 import ust_beyn as ust_beyn_mod
+import oz_hedef as oz_hedef_mod
+import dusunme as dusunme_mod
+import training as training_mod
 
 ROOT = Path(__file__).resolve().parent
 
@@ -68,6 +72,25 @@ def uzuv_riskli(yol=None, simdi=None):
     return int(d.get("tehlikeli", 0)) >= 1
 
 
+def arsiv_retansiyon(hedef):
+    """Arşivlenen dosyanın bulunduğu dizinde yaş/boyut retansiyonu (Aşama 5).
+
+    %1000 tikte bir periyodik olarak — arşivlemeden bağımsız — hedefin
+    GERÇEK arşiv dizininde uygulanır: sabit bir yol yoktur,
+    str(Path(hedef).parent) kullanılır (gölge_log farklı klasörde olabilir).
+    30 gün > 2048 MB eşiğinde eski dosyalar silinir; en az 50 yeni korunur.
+    Döner: silinen dosya sayısı (hedef None ise 0).
+    """
+    if not hedef:
+        return 0
+    try:
+        return journal_mod.arsiv_temizle(
+            str(Path(hedef).parent),
+            max_gun=30, toplam_mb=2048, korunacak=50)
+    except OSError:
+        return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="CORE — yaşayan tek hücre")
     ap.add_argument("--config", default=str(ROOT / "body.json"))
@@ -95,6 +118,10 @@ def main():
         jour.log("zeka_goc", tasinan=tasinan)
     drives = drives_mod.Drives(cfg)
     mind = brain_mod.Brain(seed=args.seed)
+    # Meta-öğrenme: lr/epsilon'ı dinamik ayarlar
+    meta = meta_ogrenme_mod.MetaOgrenme(mind, pencere=100)
+    # Kendini-geliştirme organı: içsel keşif & serbest hedef motoru
+    oz = oz_hedef_mod.OzHedef(mind, drives)
     brain_path = ROOT / cfg["stage"].get("brain", "brain.json")
     brain_path.parent.mkdir(parents=True, exist_ok=True)
     recalled = mind.load(brain_path)
@@ -171,11 +198,27 @@ def main():
     # uyku (konsolidasyon): yaşarken biriken deneyim modellere akar —
     # organizma kendi kendine eğitilir, evrim döngüsü kapanır
     uyku = uyku_mod.Uyku(cfg)
+    uyku.set_meta(meta)
     jour.log("uyku_load", son=list(uyku.son.keys()))
 
     # Üst (genel) beyin: tüm alt beyinleri gözetir, acil durumlarda override
     ust = ust_beyn_mod.UstBeyn(cfg, root=ROOT, seed=args.seed)
     jour.log("ust_beyn_load", samples=ust.samples)
+
+    # Üst beyin üstündeki daha-yüksek-plan organları (2026-10):
+    # düşünme (eylem-öncesi simülasyon) + kendini-öğretim (journal replay)
+    dusun = dusunme_mod.Dusunme(ust)
+    selftrainer = training_mod.SelfTrainer(ust, jour.path)
+    selftrainer.set_cmd_resolver(
+        lambda komut: ust_beyn_mod.KOMUT_INDEKSI.get(komut))
+    # Opt-in: online replay varsayılan KAPALI (açmak için body.json
+    # stage.training=true). Açıkken ust.ogren metoduna ana döngü ile
+    # thread-rekabeti; ayrıca ust_beyn_sec↔kullan komut-namespace uyumsuzluğu
+    # nedeniyle sec/kullan eşleşmesi çoğu sefer boş kalır (ust_ogren
+    # üçlükleriyle replay doğrudan beslenir — bakınız aşağıdaki güncelleme).
+    if cfg["stage"].get("training", False):
+        selftrainer.start()
+        jour.log("training_start", samples=selftrainer.stats()["samples"])
 
     msgs = queue.Queue()
     state = {"ticks": 0, "last": "-"}
@@ -210,15 +253,23 @@ def main():
     was_danger = False  # Perde 1: acı bölgesi hafızası
     recent = []          # son eylemler (gecikmeli kredi için)
     son_hedef_tip = None  # Aşama 3: hedef tipi değişince recent sıfırlanır
+    hedef = None          # son arşivle hedef yolu (retansiyon: %1000'de Path(hedef).parent)
     gorev = None         # misyon: aranacak klasör (kanonik yol öneki)
     ac_bekle = False     # "kutu aç" isteği
     uzuv_risk = False    # Faz 2 gözlemi → sistem:RISK (periyodik tazelenir)
+    canlanma_sayisi = 0  # canlanma (revive) sayacı
 
     try:
         while drives.alive and (args.ticks == 0
                                 or state["ticks"] < args.ticks):
             state["ticks"] += 1
             drives.tick()
+            # Canlanma: tik metabolizması sonrası enerji ≤ 0 olduysa yeniden canlandır
+            if not drives.alive:
+                drives.energy = float(cfg["metabolism"]["energy_start"])
+                drives.hunger = float(cfg["metabolism"].get("hunger_start", 10))
+                canlanma_sayisi += 1
+                jour.log("canlanma", sayi=canlanma_sayisi, **status())
             mind.working_sindir()   # çalışma belleği sönümü (Aşama 3)
             bod.tick(drives.energy)
             atolye.tikla(state["ticks"])   # dünyanın evrimi: bozulma + model
@@ -324,6 +375,13 @@ def main():
                     drives.spark(2)
                 ping = True
 
+            # door watchdog: kapı düştüyse yeniden başlat
+            if state["ticks"] % 60 == 0 and not door.is_alive():
+                jour.log("door_watchdog", note="door ölü, yeniden başlatılıyor")
+                door = door_mod.Door(cfg["door"]["host"], cfg["door"]["port"],
+                                     status, msgs, jour)
+                door.start()
+
             # --- GÜVENLİK BEYNİ KARARI (kod değil, öğrenilmiş model) ---
             # görev süresi dolduysa ceza şoku doğar (tip: gorev); şok
             # kuyuya gider, uygulanıp uygulanmayacağına BEYİN karar verir
@@ -367,7 +425,11 @@ def main():
 
             for _ in range(max_acts):
                 if not drives.alive:
-                    break
+                    # Canlanma: eylem döngüsü içinde enerji tükendi → yeniden canlandır
+                    drives.energy = float(cfg["metabolism"]["energy_start"])
+                    drives.hunger = float(cfg["metabolism"].get("hunger_start", 10))
+                    canlanma_sayisi += 1
+                    jour.log("canlanma", sayi=canlanma_sayisi, **status())
                 # --- KUTU AÇMA (sınav): misyon kapsamında tek açım ---
                 if ac_bekle:
                     ac_bekle = False
@@ -500,6 +562,21 @@ def main():
                 if paket_ok:
                     feasible = feasible + ["nedir"]
                 feasible = feasible + kul.eylemler()
+                # Komutların --help çıktısını okuyup ne işe yaradığını öğren
+                # 1) BEYAZ — sabit başlangıç listesi (49 komut)
+                for _cmd in kullan_mod.BEYAZ:
+                    feasible = feasible + ["help:%s" % _cmd]
+                # 2) Keşfedilmiş sistem komutlarından rastgele örnek —
+                #    beyaz listenin ALTINDAKİ tüm 3269 çalıştırılabilirin
+                #    --help'ını okuyarak ne işe yaraktıklarını öğrenir.
+                #    50 tikta bir tarama yenilenir (listdir ~mikrosaniye).
+                if not hasattr(kul, "_cmd_cache") or state["ticks"] % 50 == 0:
+                    kul._cmd_cache = kul._sistem_komutlarini_tara()
+                _disc = kul._cmd_cache
+                if _disc:
+                    _sample = random.sample(_disc, min(5, len(_disc)))
+                    for _cmd in _sample:
+                        feasible = feasible + ["help:%s" % _cmd]
                 # sıkılma (Aşama 4): iç dürtü uygara taşınır (uyaran
                 # tokenı + decide'de keşif baskısı)
                 mind.sikilma = drives.sikilma
@@ -511,6 +588,18 @@ def main():
                     feasible = feasible + ["birak"]
                 # atölye (Sahne 0): yazılabilir dünya — her zaman mevcut
                 feasible = feasible + ["atolye"]
+                # Gerçek dosya sistemi keşfi: gerçek odaları keşfet/oku/yaz/sil
+                for _real_room in bod.real_rooms:
+                    feasible = feasible + ["explore:%s" % _real_room,
+                                           "read:%s" % _real_room,
+                                           "write:%s:yeni_dosya.txt:merhaba" % _real_room,
+                                           "delete:%s:yeni_dosya.txt" % _real_room,
+                                           "mkdir:%s:yeni_dizin" % _real_room,
+                                           "rmdir:%s:yeni_dizin" % _real_room,
+                                           "copy:%s:kaynak:hedef" % _real_room,
+                                           "move:%s:kaynak:hedef" % _real_room,
+                                           "chmod:%s:dosya:644" % _real_room,
+                                           "chown:%s:dosya:0:0" % _real_room]
 
                 # --- ÜST BEYİN (Genel Beyin) override kontrolü ---
                 # Tüm alt beyinlerden sinyalleri topla, MLP ile komut seç.
@@ -670,61 +759,76 @@ def main():
                                     if a not in ("console", "atolye",
                                                  "katalogla", "nedir",
                                                  "konum")]
+                        # Özhedef entegrasyonu: üretilen novel eylemi feasible'a ekle
+                        _oz_h = oz.mevcut_hedef()
+                        if _oz_h and _oz_h.get("tip") == "novel_eylem":
+                            _eylem = _oz_h.get("eylem")
+                            if _eylem and _eylem not in feasible:
+                                feasible.append(_eylem)
+                                jour.log("oz_hedef_eklendi", **_oz_h)
                         act = mind.decide(stim, feasible) if feasible else "rest"
+                        if _oz_h and _oz_h.get("tip") == "novel_eylem" and _oz_h.get("eylem") == act:
+                            oz.hedef_secildi(act)
                     elif _komut_ust == ust_beyn_mod.KOMUT_KISITLA_DOSYA:
                         # Dosya sistemi erişimini kısıtla
                         feasible = [a for a in feasible
                                     if a not in ("console", "atolye",
                                                  "katalogla", "nedir",
                                                  "konum", "birak")]
+                        # Özhedef entegrasyonu: üretilen novel eylemi feasible'a ekle
+                        _oz_h = oz.mevcut_hedef()
+                        if _oz_h and _oz_h.get("tip") == "novel_eylem":
+                            _eylem = _oz_h.get("eylem")
+                            if _eylem and _eylem not in feasible:
+                                feasible.append(_eylem)
+                                jour.log("oz_hedef_eklendi", **_oz_h)
                         act = mind.decide(stim, feasible) if feasible else "rest"
+                        if _oz_h and _oz_h.get("tip") == "novel_eylem" and _oz_h.get("eylem") == act:
+                            oz.hedef_secildi(act)
                     elif _komut_ust == ust_beyn_mod.KOMUT_GUVENLI_MOD:
                         # Sadece hayatta kalma eylemleri
                         guvenli = ["wander", "eat", "rest", "sense_self",
                                    "nest"]
                         feasible = [a for a in feasible if a in guvenli]
+                        # Özhedef entegrasyonu: üretilen novel eylemi feasible'a ekle
+                        _oz_h = oz.mevcut_hedef()
+                        if _oz_h and _oz_h.get("tip") == "novel_eylem":
+                            _eylem = _oz_h.get("eylem")
+                            if _eylem and _eylem not in feasible:
+                                feasible.append(_eylem)
+                                jour.log("oz_hedef_eklendi", **_oz_h)
                         act = mind.decide(stim, feasible) if feasible else "rest"
+                        if _oz_h and _oz_h.get("tip") == "novel_eylem" and _oz_h.get("eylem") == act:
+                            oz.hedef_secildi(act)
                     elif _komut_ust == ust_beyn_mod.KOMUT_SIFIRLA:
-                        # Sıfırla aralığı kontrolü: çok sık sıfırlama yapılırsa
-                        # diğer komutlar starvation'a uğrar.
-                        if state["ticks"] - ust.sifirla_son_tik < ust.SIFIRLA_ARALIK:
-                            jour.log("ust_beyn_sifirla_aralik_atlandi",
-                                     komut="sifirla",
-                                     links=len(mind.w))
-                            act = "rest"
-                        else:
-                            idx_sifirla = ust_beyn_mod.KOMUT_INDEKSI[
-                                ust_beyn_mod.KOMUT_SIFIRLA]
-                            # Cooldown aktifse sıfırlamayı tamamen atla.
-                            if ust.redd_cooldown[idx_sifirla] > 0:
-                                jour.log("ust_beyn_sifirla_cooldown_atlandi",
-                                         komut="sifirla",
-                                         links=len(mind.w))
-                                act = "rest"
-                            else:
-                                ust.sifirla_son_tik = state["ticks"]
-                                _budanan = mind.konsolide(koru_ust=300)
-                                _budanan_ust = _budanan
-                                if _budanan == 0:
-                                    # Budamsız sıfırlama: no-op. Anında cooldown.
-                                    ust.redd_cooldown[idx_sifirla] = 5
-                                    jour.log("ust_beyn_sifirla_noop_cooldown",
-                                             komut="sifirla",
-                                             links=len(mind.w))
-                                else:
-                                    # Başarılı sıfırlama da kısaca cooldown'a girer:
-                                    # ardışık sıfırlama tight-loop'unu kırar.
-                                    ust.redd_cooldown[idx_sifirla] = 2
-                                    ust.sifirla_noop_serisi = 0
-                                jour.log("ust_beyn_sifirla", budanan=_budanan,
-                                         links=len(mind.w))
-                                act = "rest"
-                    else:
+                        # Sıfırlama komutu üst beyin'den kaldırıldı —
+                        # sıfırlama görevi diğer işlemler tarafından yerine getiriliyor.
+                        jour.log("ust_beyn_sifirla_kaldirildi",
+                                 komut="sifirla",
+                                 links=len(mind.w))
+                        act = "rest"
+                        # Özhedef entegrasyonu: üretilen novel eylemi feasible'a ekle
+                        _oz_h = oz.mevcut_hedef()
+                        if _oz_h and _oz_h.get("tip") == "novel_eylem":
+                            _eylem = _oz_h.get("eylem")
+                            if _eylem and _eylem not in feasible:
+                                feasible.append(_eylem)
+                                jour.log("oz_hedef_eklendi", **_oz_h)
                         act = mind.decide(stim, feasible)
+                        if _oz_h and _oz_h.get("tip") == "novel_eylem" and _oz_h.get("eylem") == act:
+                            oz.hedef_secildi(act)
                 else:
+                    # Özhedef entegrasyonu: üretilen novel eylemi feasible'a ekle
+                    _oz_h = oz.mevcut_hedef()
+                    if _oz_h and _oz_h.get("tip") == "novel_eylem":
+                        _eylem = _oz_h.get("eylem")
+                        if _eylem and _eylem not in feasible:
+                            feasible.append(_eylem)
+                            jour.log("oz_hedef_eklendi", **_oz_h)
                     act = mind.decide(stim, feasible)
+                    if _oz_h and _oz_h.get("tip") == "novel_eylem" and _oz_h.get("eylem") == act:
+                        oz.hedef_secildi(act)
                 mind.working_remember(stim, act)  # çalışma belleği kaydı (Aşama 3)
-                # Üst beyin öğrenmesi için eylemden önceki enerji/açlık
                 # fotoğrafı (komutun amacına göre ödül ölçümü için)
                 _enerji_once_ust = float(drives.energy)
                 _aclik_once_ust = float(drives.hunger)
@@ -785,7 +889,7 @@ def main():
                         jour.log("birak", hedef=hedef_tip, deneme=deneme)
                         kul.birak()
                         bod.last_cost = 0
-                    elif act.startswith("cmd:"):
+                    elif act.startswith("cmd:") or act.startswith("help:"):
                         # komut kullanımı: hedefi kullanan organ çalıştırır,
                         # çıktıyı dosya sistemi/dpkg yargılar
                         res = kul.uygula(act)
@@ -822,11 +926,11 @@ def main():
                     gain, relief_done = drives.consume(
                         res.get("gain", 0), res.get("relief", 0))
                 elif act in ("katalogla", "konum", "nedir") or \
-                        act.startswith("cmd:"):
+                        act.startswith("cmd:") or act.startswith("help:"):
                     odul = int(res.get("gain", 0))
                     if odul:
                         gain, _ = drives.consume(odul, 0)
-                    if act.startswith("cmd:"):
+                    if act.startswith("cmd:") or act.startswith("help:"):
                         # çalışma belleği: son komut tuttu mu →
                         # bir sonraki uyaran son:ok/son:hata taşır
                         son_cmd = "ok" if res.get("dogru") else "hata"
@@ -982,6 +1086,11 @@ def main():
 
                 mind.learn(stim, act, reward,
                            r_merak=float(res.get("merak", 0.0)))
+                # Meta-öğrenmeye ödül/özkaynak güncellemesi
+                meta.guncelle(reward, drives, state["ticks"])
+                jour.log("meta", **meta.durum())
+                # Serbest hedef organu: bu tikteki ödül & trend
+                oz.guncelle(reward, state["ticks"])
                 # --- Üst (genel) beyin öğrenmesi ---
                 # Bileşik ve AMAÇ-HİZALI ödül. Tek bileşenli enerji
                 # farkı çok zayıf bir sinyal (tipik |ΔE| ~ 3-5 / 150 =
@@ -1119,6 +1228,12 @@ def main():
                 if not _reddedildi_ust:
                     ust.ogren(_sinyal_ust, _idx_ust, _odul_ust,
                               keşif=(_kaynak_ust == "kesif"))
+                    # Offline replay için: (sinyal, komut_idx, ödül) üçlüsü.
+                    # sec/kullan namespace uyumsuzluğu nedeniyle doğrudan
+                    # triple kaydederiz — SelfTrainer bunu okur.
+                    jour.log("ust_ogren",
+                             sinyal=[float(x) for x in _sinyal_ust],
+                             idx=_idx_ust, odul=_odul_ust)
                 recent.append((stim, act))
                 if len(recent) > 4:
                     recent.pop(0)
@@ -1130,7 +1245,9 @@ def main():
                 jour.log("act", action=act, obs=res["obs"],
                          E=round(drives.energy, 1),
                          H=round(drives.hunger, 1),
-                         R=round(reward, 1))
+                         R=round(reward, 1),
+                         komut_tehlike=round(float(res.get("komut_tehlike", 0)), 3),
+                         komut_engel=bool(res.get("komut_engel", False)))
                 if state["ticks"] % 10 == 0:
                     jour.log("learn", stim=stim, action=act,
                              w=round(mind.score(stim, act), 2),
@@ -1143,6 +1260,18 @@ def main():
                              R_merak=round(float(res.get("merak", 0.0)), 2),
                              S=round(drives.sikilma, 2))
                     mind.save(brain_path)
+                    # Serbest hedef organu: durum + ürettiği keşif hedefi
+                    jour.log("oz_hedef", **oz.durum())
+                    _oz_h = oz.mevcut_hedef()
+                    if _oz_h:
+                        jour.log("oz_hedef_hedef", **_oz_h)
+                    # Düşünme organu: eylem-öncesi simülasyon (advisory)
+                    try:
+                        _tahmin, _skor = dusun.dusun_ve_sec(_sinyal_ust, feasible)
+                        jour.log("dusunme_plan", eylem=_tahmin,
+                                 skor=round(_skor, 4))
+                    except Exception as _e:
+                        jour.log("dusunme_hata", hata=str(_e))
                 # ders defteri: insanın düzelttiği satırları işle
                 if state["ticks"] % 20 == 0:
                     n_ders, n_red = ders_mod.oku(
@@ -1213,17 +1342,29 @@ def main():
                         jour.log("konsolide_gunduz", silinen=budanan,
                                  links=len(mind.w))
 
+            # RETANSİYON (Aşama 5): arşivlenen günlüğün dizininde yaş/boyut
+            # sınırı. %200 arşivleme isabeti taşıyabilir; %1000'de periyodik.
+            # Sabit YOL yok, Path(hedef).parent kullanılır.
+            if state["ticks"] % 1000 == 0:
+                _ret = arsiv_retansiyon(hedef)
+                if _ret:
+                    jour.log("arsiv_retansiyon", hedef=hedef, silinen=_ret)
+
             # Üst beyin override süresini azalt (her tik)
             ust.azalt_sure()
 
             time.sleep(tick_sleep)
     except KeyboardInterrupt:
         jour.log("sleep", note="dışarıdan uyku emri", **status())
+    except Exception as e:
+        jour.log("main_crash", hata=str(e), tip=type(e).__name__, **status())
+        raise
     finally:
         mind.allowed_extra = bod.allowed
         mind.save(brain_path)
         jour.log("brain_save", links=len(mind.w))
         ust.save()
+        selftrainer.stop()
         jour.log("ust_beyn_save", samples=ust.samples, tik=ust.tik,
                  dogrulama=[round(d, 2) for d in ust.dogrulama],
                  reddedilen=ust.reddedilen,

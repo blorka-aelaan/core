@@ -37,6 +37,9 @@ class Mini(ub.UstBeyn):
         self.tik = 0
         self.secim_sayilari = [0] * CIK
         self.reddedilen_sayilari = [0] * CIK
+        self.redd_serisi = [0] * CIK
+        self.redd_cooldown = [0] * CIK
+        self.RED_SERI_MAKS = 3
         self.odul_gecmisi = []
 
 
@@ -50,7 +53,7 @@ def sinyal(acik, tehlike, yemek_var):
     return v
 
 
-def odul_hesapla(idx, acik, tehlike, yemek_var, budama=False):
+def odul_hesapla(idx, acik, tehlike, yemek_var):
     """main.py'deki amaç-hizalı ödül mantığının aynısı."""
     o = 0.0
     if idx == ub.KOMUT_INDEKSI[ub.KOMUT_ACIL_DINLEN]:
@@ -66,10 +69,6 @@ def odul_hesapla(idx, acik, tehlike, yemek_var, budama=False):
         o += 0.3 if tehlike else -0.05
     elif idx == ub.KOMUT_INDEKSI[ub.KOMUT_GUVENLI_MOD]:
         o += 0.25 if tehlike else -0.05
-    elif idx == ub.KOMUT_INDEKSI[ub.KOMUT_SIFIRLA]:
-        # main.py: sıfırla ödülü BUDAMA gerçekleştiyse pozitif,
-        # gerçekleşmediyse negatiftir (gereksiz işlem).
-        o += 0.15 if budama else -0.1
     return o
 
 
@@ -81,8 +80,6 @@ Fazlar = [(70.0, 0.0, True), (30.0, 0.6, True), (40.0, 0.0, False)]
 for tik in range(1200):
     acik, tehlike, yemek = Fazlar[tik % 3]
     xs = sinyal(acik, tehlike, yemek)
-    # main.py: budama ara sıra gerçekleşir (tabloda ölü ağırlık varsa)
-    budama = (tik % 10 == 0)
     komut, idx, gv, kaynak = m.sec(xs)
     if idx == YOK:
         # main.py: "yok" → tehlikede ceza, aksi halde NÖTR (0.0)
@@ -99,7 +96,7 @@ for tik in range(1200):
     else:
         model_onay += 1
     kabul += 1
-    m.ogren(xs, idx, odul_hesapla(idx, acik, tehlike, yemek, budama),
+    m.ogren(xs, idx, odul_hesapla(idx, acik, tehlike, yemek),
             keşif=(kaynak == "kesif"))
 
 print("kabul=%d red=%d kesif_kabul=%d model_onay=%d"

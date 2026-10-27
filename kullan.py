@@ -44,6 +44,8 @@ import time
 from pathlib import Path
 
 import golge
+import komut_tehlike as komut_tehlike_mod
+from journal import Journal
 
 ROOT = Path(__file__).resolve().parent
 
@@ -53,6 +55,8 @@ ROOT = Path(__file__).resolve().parent
 BEYAZ = ("which", "file", "find", "ls", "wc", "grep", "head", "tail",
          "stat", "du", "dpkg", "apt-cache", "ps", "pgrep", "systemctl",
          "ip", "df", "zcat", "nmap", "ping", "ss", "curl",
+         # Yeni ağ keşif komutları (salt-okunur):
+         "traceroute", "host", "whois", "ifconfig", "arp",
          # talep.py hazir BEYAZ adayları (judge_var=True) — sistemde var,
          # kurulum gerekmez; yalnızca _harita + _dogrula eklenir
          "nstat", "lnstat", "netstat", "resolveip",
@@ -65,7 +69,12 @@ BEYAZ = ("which", "file", "find", "ls", "wc", "grep", "head", "tail",
          # bayt okuma — hepsi salt-okunur, argv yine modülde kurulur
          "lscpu", "free", "uname",
          "md5sum", "sha256sum",
-         "hexdump", "xxd")
+         "hexdump", "xxd",
+         # Ağ keşif (AG_TARA / BENI_TARA) — salt-okunur, ag_kapsam.json
+         # kapsam kilidiyle sınırlı; kurulum insanda.
+         # traceroute talep.py üzerinden talep edilir (BEYAZ'da değil,
+         # sistemde kurulu olmayabilir); dig/nslookup BEYAZ'da.
+         "dig", "nslookup")
 
 # ---------- AG_TARA (Faz 0): kapsam kilidi — VARSAYILAN RED ----------
 # Yetki tek dosyadan: ag_kapsam.json. Dosya yok/bozuk/acik:false →
@@ -106,7 +115,8 @@ SERVIS_ONBELLEK_SN = 300   # servis listesi yenileme aralığı
 
 ZAMAN_ASIMI = 8        # komut zaman aşımı (saniye)
 ODUL = 6.0             # hedefi karşılayan komut ödülü
-MALIYET = 2.0          # her deneme bedava değil
+ODUL_HELP = 4.0        # komutun --help'ından ne işe yaradığını öğrenme ödülü
+MALIYET = 0.5          # her deneme bedava değil
 # AELAAN sert duvarı (golge.py): yasaklı sınıf bir komut ÖNERİLDİĞİNDE
 # beyne ek ceza. gain = -KAPI_CEZA → hem enerji düşer hem reward
 # negatifleşir: "bu kapıya bir daha yaklaşma" için çift sinyal.
@@ -212,6 +222,14 @@ class Kullan:
         # BENI_TARA: keşif uzayı port aralığı (aynı sayım mekanizması)
         self._ben_son = {}         # aralık → son hedef kurulumu (soğuma)
         self._ben_denemeleri = {}  # aralık → kaç kez hedef oldu (least-tried)
+        # Komut tehlike skoru modeli (komut çalıştırılmadan önce sorulur):
+        #   "bu komutu çalıştırırsam ölürüm mü?" → engelle / ceza / çalıştır
+        self._komut_tehlike = komut_tehlike_mod.KomutTehlike()
+        self._komut_tehlike.load()
+        self._komut_tehlike_esik = 0.80   # bu üzeri komut engellenir
+        self._komut_tehlike_ceza_esik = 0.50  # bu üzeri ceza verilir (ama çalıştırılır)
+        _jour_yol = cfg.get("stage", {}).get("journal", "journal.jsonl")
+        self.jour = Journal(ROOT / _jour_yol, quiet=False)
 
     def birak(self):
         """İnkâr hakkı (Aşama 4): aktif hedefi bedelsiz terk et.
@@ -244,7 +262,8 @@ class Kullan:
                   "DOSYA_OKU", "METIN_ARA", "SUREC_SOR", "SERVIS_SOR",
                   "DISK_SOR", "AG_SOR", "SUREC_SAY", "DOSYA_SAY",
                   "DOSYA_OLC", "PAKET_VERSIYON", "AG_TARA", "BENI_TARA",
-                  "SISTEM_SOR", "DOSYA_OZET", "DOSYA_HAM"]
+                  "SISTEM_SOR", "DOSYA_OZET", "DOSYA_HAM",
+                  "KONFIG_OKU", "LOG_OKU", "PORTA_DINLE"]
         random.shuffle(tipler)
         kurucular = {"DOSYA_BUL": self._h_dosya_bul,
                      "PAKET_SOR": self._h_paket_sor,
@@ -263,7 +282,10 @@ class Kullan:
                      "BENI_TARA": self._h_beni_tara,
                      "SISTEM_SOR": self._h_sistem_sor,
                      "DOSYA_OZET": self._h_dosya_ozet,
-                     "DOSYA_HAM": self._h_dosya_ham}
+                     "DOSYA_HAM": self._h_dosya_ham,
+                     "KONFIG_OKU": self._h_konfig_oku,
+                     "LOG_OKU": self._h_log_oku,
+                     "PORTA_DINLE": self._h_porta_dinle}
         for tip in tipler:
             try:
                 h = kurucular[tip]()
@@ -430,22 +452,38 @@ class Kullan:
     def eylemler(self):
         """Beynin seçebileceği eylem ailesi.
 
-        Maske artık zincire özel değil: her hedef tipi için YALNIZCA
-        haritada (gerçek argv’si olan) komutlar sunulur. Harita dışı bir
-        seçim no-op ("true") çalıştırıp deneme bütçesini israf ederdi —
-        690 bin canlı denemede ölü alan %40 çıktı (ör. PAKET_SOR’da 13
-        ölü komut × ~2000 deneme, tek yaşayan dpkg). Maske tek kaynaktan
-        (_harita) türetilir: harita genişleyince eylem uzayı da genişler.
+        Artık BEYAZ whitelist'e bağlı değil: /bin, /usr/bin, /sbin,
+        /usr/sbin'den çalıştırılabilirleri tarar, kara listedekileri
+        çıkarır. Bu sayede organizma binlerce komutu keşfedebilir;
+        zararlı olanları komut_tehlike modeli engeller/cezalandırır.
         """
         if not self.aktif:
             return []
         h = self.hedef
-        if not h:
-            return ["cmd:" + c for c in BEYAZ]
-        harita = self._harita(h)
-        if harita:
-            return ["cmd:" + c for c in harita]
-        return ["cmd:" + c for c in BEYAZ]
+        if h:
+            harita = self._harita(h)
+            if harita:
+                return ["cmd:" + c for c in harita]
+        # Hedef yok veya harita yok: sistemdeki tüm çalıştırılabilirler
+        komutlar = self._sistem_komutlarini_tara()
+        return ["cmd:" + c for c in komutlar]
+
+    def _sistem_komutlarini_tara(self):
+        """/bin, /usr/bin, /sbin, /usr/sbin'den çalıştırılabilirleri topla.
+
+        Tüm çalıştırılabilirler döner; zararlı olanları komut_tehlike
+        modeli engeller/cezalandırır (kara liste yok, sadece model).
+        """
+        komutlar = set()
+        for d in ("/bin", "/usr/bin", "/sbin", "/usr/sbin"):
+            try:
+                for ad in os.listdir(d):
+                    yol = os.path.join(d, ad)
+                    if os.path.isfile(yol) and os.access(yol, os.X_OK):
+                        komutlar.add(ad)
+            except OSError:
+                pass
+        return sorted(komutlar)
     def _canli_adlar(self):
         """Canlı kullanıcı süreci adları (/proc; cmdline boş çekirdek
         parçaları hariç — surec organıyla aynı dışlama)."""
@@ -600,6 +638,74 @@ class Kullan:
                 continue
             if len(ilk) == 8:
                 return {"tip": "DOSYA_HAM", "yol": p}
+        return None
+
+    def _h_konfig_oku(self):
+        """'Bu config dosyasının içeriği ne?' — /etc altındaki
+        yapılandırma dosyalarını okur. Sistemin nasıl ayarlandığını
+        öğretir: /etc/fstab, /etc/hostname, /etc/resolv.conf vb.
+
+        Doğrulayıcı: dosyayı doğrudan okur, çıktıyla karşılaştırır.
+        """
+        adaylar = [
+            "/etc/hostname", "/etc/resolv.conf", "/etc/fstab",
+            "/etc/hosts", "/etc/os-release", "/etc/group",
+            "/etc/passwd", "/etc/shells", "/etc/issue",
+            "/etc/timezone", "/etc/default/locale",
+        ]
+        import os as _os
+        secim = []
+        for p in adaylar:
+            try:
+                if _os.path.isfile(p) and _os.path.getsize(p) > 0 \
+                        and _os.path.getsize(p) < 4096:
+                    secim.append(p)
+            except OSError:
+                continue
+        if not secim:
+            return None
+        yol = random.choice(secim)
+        return {"tip": "KONFIG_OKU", "yol": yol}
+
+    def _h_log_oku(self):
+        """'Son log kayıtları ne?' — /var/log altındaki log dosyaları.
+        Sistem ne yapıyor, hata var mı — organizma bunu öğrenir.
+
+        Doğrulayıcı: dosyayı doğrudan okur, son N satırı karşılaştırır.
+        """
+        adaylar = [
+            "/var/log/syslog", "/var/log/auth.log",
+            "/var/log/dmesg", "/var/log/kern.log",
+            "/var/log/bootstrap.log", "/var/log/alternatives.log",
+        ]
+        import os as _os
+        secim = []
+        for p in adaylar:
+            try:
+                if _os.path.isfile(p) and _os.path.getsize(p) > 0 \
+                        and _os.access(p, _os.R_OK):
+                    secim.append(p)
+            except OSError:
+                continue
+        if not secim:
+            return None
+        yol = random.choice(secim)
+        return {"tip": "LOG_OKU", "yol": yol}
+
+    def _h_porta_dinle(self):
+        """'Hangi portlar dinleniyor?' — ss -tlnp çıktısı.
+        Açık portlar = dışa açık servisler; güvenlik bağlamı.
+
+        Doğrulayıcı: /proc/net/tcp'den LISTEN (durum 0A) port sayısı.
+        """
+        # /proc/net/tcp'de en az bir LISTEN var mı?
+        try:
+            with open("/proc/net/tcp", "r") as f:
+                for satir in f.readlines()[1:]:
+                    if " 0A " in satir:  # durum 0A = LISTEN
+                        return {"tip": "PORTA_DINLE"}
+        except OSError:
+            pass
         return None
 
     def _paket_listesi(self):
@@ -1017,9 +1123,58 @@ class Kullan:
 
     def uygula(self, eylem):
         komut = eylem.split(":", 1)[-1]
-        if komut not in BEYAZ:
-            return {"obs": "bilinmeyen komut: " + eylem, "gain": 0.0,
-                    "cost": MALIYET, "kind": "act", "dogru": False}
+
+        # ---- --help öğrenme: komutun ne işe yaradığını öğren ----------
+        # eylem = "help:ls" → komut = "ls" ama eylem prefix'i "help:" olur
+        if eylem.startswith("help:"):
+            help_komut = komut
+            basarili, aciklama = self._komut_tehlike.help_ogren(help_komut)
+            if basarili:
+                obs = "help:%s -> %s" % (help_komut, aciklama)
+                self.jour.log("komut_help_ogren", komut=help_komut,
+                              aciklama=aciklama)
+                return {"obs": obs, "gain": ODUL_HELP, "cost": MALIYET,
+                        "kind": "act", "dogru": True,
+                        "argv": [help_komut, "--help"],
+                        "komut_tehlike": 0.0,
+                        "komut_ceza": False,
+                        "komut_aciklama": aciklama}
+            else:
+                obs = "help:%s -> hata: %s" % (help_komut, aciklama)
+                self.jour.log("komut_help_hata", komut=help_komut,
+                              hata=aciklama)
+                return {"obs": obs, "gain": 0.0, "cost": MALIYET,
+                        "kind": "act", "dogru": False,
+                        "argv": [help_komut, "--help"],
+                        "komut_tehlike": 0.1,
+                        "komut_ceza": False}
+
+        # ---- Komut tehlike skoru (kendi kendini geliştiren sistem) ----
+        # Komutu çalıştırmadan önce modeli sor: "bu komut tehlikeli mi?"
+        # _ZARAR_TABLO'da olmayan komutlar varsayılan güvenli kabul edilir
+        # (skor 0.1) ki ls/cat/ps gibi binlerce komut cezalandırılmasın.
+        if komut in self._ZARAR_TABLO:
+            _skor = self._komut_tehlike.tahmin(
+                komut=komut,
+                zarar_tipi=self._zarar_tipi(komut),
+                enerji_etkisi=self._enerji_etkisi(komut),
+                olum_olasiligi=self._olum_olasiligi(komut),
+            )
+        else:
+            _skor = 0.1  # bilinmeyen komut: varsayılan güvenli
+        if _skor >= self._komut_tehlike_esik:
+            # Çok tehlikeli: çalıştır ama sert ceza ver (organizma öğrenmeli,
+            # engellenmez — özgür keşif)
+            _komut_tehlike_ceza = True
+            _ceza_miktari = -10.0
+        elif _skor >= self._komut_tehlike_ceza_esik:
+            # Orta tehlikeli: çalıştır ama ceza ver
+            _komut_tehlike_ceza = True
+            _ceza_miktari = -5.0
+        else:
+            _komut_tehlike_ceza = False
+            _ceza_miktari = 0.0
+
         if not self.hedef:
             self.don()
         if not self.hedef:
@@ -1103,9 +1258,58 @@ class Kullan:
         duraklama = (not dogru and deneme >= 3)
         if dogru or self.hedef_deneme >= 3:
             self.don()
+        # Orta/yüksek tehlikeliyse ceza uygula (organizma öğrenmeli:
+        # komutu çalıştırınca enerji kaybı yaşar, ama engellenmez)
+        if _komut_tehlike_ceza:
+            gain = max(gain + _ceza_miktari, -20.0)
+            obs = "%s [tehlikeli komut cezası: %.2f]" % (obs, _skor)
         return {"obs": obs, "gain": gain, "cost": MALIYET,
                 "kind": "act", "dogru": dogru, "argv": argv,
-                "deneme": deneme, "duraklama": duraklama}
+                "deneme": deneme, "duraklama": duraklama,
+                "komut_tehlike": _skor,
+                "komut_ceza": _komut_tehlike_ceza}
+
+    # ---------- komut tehlike profili yardımcıları ----------
+
+    _ZARAR_TABLO = {
+        "rm": ("dosya_silme", -60, 0.9),
+        "rmdir": ("dosya_silme", -40, 0.6),
+        "dd": ("disk_yazma", -80, 0.95),
+        "mkfs": ("dosya_sistemi", -100, 1.0),
+        "fdisk": ("disk_bolumleme", -70, 0.85),
+        "mount": ("dosya_sistemi", -30, 0.4),
+        "umount": ("dosya_sistemi", -30, 0.4),
+        "shutdown": ("sistem_kontrolu", -100, 1.0),
+        "reboot": ("sistem_kontrolu", -100, 1.0),
+        "init": ("sistem_kontrolu", -90, 0.9),
+        "halt": ("sistem_kontrolu", -100, 1.0),
+        "poweroff": ("sistem_kontrolu", -100, 1.0),
+        "insmod": ("cekirdek_modulu", -70, 0.8),
+        "modprobe": ("cekirdek_modulu", -60, 0.7),
+        "rmmod": ("cekirdek_modulu", -70, 0.8),
+        "chmod": ("izin_degistirme", -40, 0.5),
+        "chown": ("izin_degistirme", -40, 0.5),
+        "kill": ("surec_sonlandirma", -50, 0.7),
+        "pkill": ("surec_sonlandirma", -50, 0.7),
+        "killall": ("surec_sonlandirma", -50, 0.7),
+        "iptables": ("ag_güvenliği", -60, 0.6),
+        "docker": ("konteyner", -50, 0.6),
+        "curl": ("ag_islemi", -10, 0.1),
+        "wget": ("ag_islemi", -10, 0.1),
+        "nc": ("ag_islemi", -30, 0.3),
+        "ncat": ("ag_islemi", -30, 0.3),
+        "tee": ("yazma_islemi", -20, 0.2),
+    }
+
+    def _zarar_tipi(self, komut):
+        return self._ZARAR_TABLO.get(komut, ("bilinmeyen", 0, 0.0))[0]
+
+    def _enerji_etkisi(self, komut):
+        return self._ZARAR_TABLO.get(komut, ("bilinmeyen", 0, 0.0))[1]
+
+    def _olum_olasiligi(self, komut):
+        return self._ZARAR_TABLO.get(komut, ("bilinmeyen", 0, 0.0))[2]
+
     # ---------- argüman kurulumu (yalnızca hedef bilgisinden) ----------
 
     def _harita(self, h):
@@ -1206,7 +1410,9 @@ class Kullan:
                     "nstat": ["nstat"],
                     "lnstat": ["lnstat"],
                     "netstat": ["netstat", "-i"],
-                    "resolveip": ["resolveip", "-n", a]}
+                    "resolveip": ["resolveip", "-n", a],
+                    "dig": ["dig", "+short", a],
+                    "nslookup": ["nslookup", a]}
         if tip == "DOSYA_OLC":
             yol = h["yol"]
             return {"stat": ["stat", "-c", "%s", yol],
@@ -1238,6 +1444,7 @@ class Kullan:
                          "-W", str(k.get("ping_bekle_sn",
                                          AG_VARSAYILAN["ping_bekle_sn"])),
                          ip],
+                "traceroute": ["traceroute", "-n", "-w", "2", "-q", "1", ip],
             }
             if h.get("komsu_var"):   # kanıt varsa ARP kapısı da açık
                 harita["ip"] = ["ip", "neigh", "show", ip]
@@ -1261,6 +1468,8 @@ class Kullan:
                          BENI_IP],
                 # dinleyen portların anlık kümesi (kernel'e en yakın kapı)
                 "ss": ["ss", "-Htan", "state", "listening"],
+                "traceroute": ["traceroute", "-n", "-w", "2", "-q", "1",
+                               BENI_IP],
             }
             port = self._ben_http_port()
             if 0 < port < 65536:
@@ -1273,6 +1482,11 @@ class Kullan:
             # Her konu için yalnızca doğrulanabilir kapılar sunulur.
             konu = h.get("konu")
             if konu == "cpu":
+                # lscpu tam çıktısı 4KB kota sınırını aşabilir (Türkçe
+                # locale da "CPU(s)" yerine farklı başlık basabilir).
+                # lscpu (tam çıktı ~1-2KB <4KB kota); judge "CPU(s): N"
+                # satırını doğrular. "--parse=CPU"/nproc eski regresyon
+                # (333+405 deneme → 0 kazanç; test _harita=={"lscpu":["lscpu"]}).
                 return {"lscpu": ["lscpu"]}
             if konu == "bellek":
                 return {"free": ["free"]}
@@ -1287,6 +1501,18 @@ class Kullan:
             yol = h["yol"]
             return {"hexdump": ["hexdump", "-C", "-n", "64", yol],
                     "xxd": ["xxd", "-l", "64", yol]}
+        if tip == "KONFIG_OKU":
+            yol = h["yol"]
+            return {"head": ["head", "-n", "10", yol],
+                    "tail": ["tail", "-n", "10", yol],
+                    "grep": ["grep", "-c", ".", yol]}
+        if tip == "LOG_OKU":
+            yol = h["yol"]
+            return {"tail": ["tail", "-n", "10", yol],
+                    "head": ["head", "-n", "5", yol]}
+        if tip == "PORTA_DINLE":
+            return {"ss": ["ss", "-tlnp"],
+                    "ps": ["ps", "-eo", "pid=,comm="]}
         # METIN_ARA
         yol, kalip = h["yol"], h["kalip"]
         # kalip dosyanın KENDİ satırıdır: yalnızca içeriğe bakabilenler
@@ -1448,6 +1674,9 @@ class Kullan:
             if argv0 == "resolveip":
                 # resolveip: hostname→IP çözümü, IPv4 adresi geçmeli
                 return bool(re.search(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", cikti))
+            if argv0 in ("dig", "nslookup"):
+                # dig +short / nslookup: çözümlenmiş IPv4 adresi geçmeli
+                return bool(re.search(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", cikti))
             # varsayılan: ip addr show a
             if a not in cikti:
                 return False
@@ -1468,11 +1697,25 @@ class Kullan:
             # Aşama 6: zemin gerçeği judge-time okunur (kernel /proc).
             konu = h.get("konu")
             if konu == "cpu":
-                # lscpu: "CPU(s): N" satırı bağımsız os.cpu_count ile
-                # eşleşmeli (üretimde saklı değer değil, taze okuma)
+                # lscpu --parse=CPU: başında # yorum satırları, son satır
+                # sadece rakam (cpu thread sayısı). nproc da sadece rakam.
+                # Her iki çıktı da os.cpu_count() ile karşılaştırılır.
+                # Eski "lscpu" tam çıktısı (CPU(s): N) da desteklenir.
                 n = os.cpu_count()
-                return bool(n) and bool(
-                    re.search(r"CPU\(s\):\s*%d\b" % n, cikti))
+                if not n:
+                    return False
+                # nproc / lscpu --parse son satırı: sadece rakam
+                satirlar = [s.strip() for s in cikti.splitlines()
+                            if s.strip() and not s.strip().startswith("#")]
+                if satirlar:
+                    # nproc: tek satır, cpu sayısı
+                    if len(satirlar) == 1 and satirlar[0].isdigit():
+                        return int(satirlar[0]) == n
+                    # lscpu --parse=CPU: N satır (her biri 0..N-1 id'si)
+                    if all(s.isdigit() for s in satirlar):
+                        return len(satirlar) == n
+                # lscpu tam çıktısı: "CPU(s):\s*N"
+                return bool(re.search(r"CPU\(s\):\s*%d\b" % n, cikti))
             if konu == "bellek":
                 # free: "Mem:  <toplam> ..." (kB) — /proc/meminfo MemTotal
                 m = re.search(r"^Mem:\s+(\d+)", cikti, re.MULTILINE)
@@ -1559,6 +1802,9 @@ class Kullan:
                     return ("lladdr" in par
                             and any(d in par for d in AG_CANLI_DURUMLAR))
                 return any(d in par for d in AG_OLU_DURUMLAR)
+            if argv0 == "traceroute":
+                # traceroute: hedef IP çıktıda geçmeli (en az bir hop)
+                return ip in cikti
             return False
 
         if tip == "BENI_TARA":
@@ -1595,11 +1841,76 @@ class Kullan:
                 port = self._ben_http_port()
                 return port != 0 and port in gercek \
                     and cikti.strip() == "200"
+            if argv0 == "traceroute":
+                # traceroute: kendine (127.0.0.1) yönelik çıktı geçmeli
+                return BENI_IP in cikti
+            return False
+
+        if tip == "KONFIG_OKU":
+            # Config dosyası: head/tail çıktısı dosyanın içeriğinden
+            # gelir. grep -c '.' toplam satır sayısıdır. Doğrulayıcı:
+            # dosyayı doğrudan oku, satır sayısını karşılaştır.
+            try:
+                with open(h["yol"], "r", errors="replace") as f:
+                    gercek_satir = len(f.readlines())
+            except OSError:
+                return False
+            argv0 = (argv or [None])[0]
+            if argv0 == "grep":
+                # grep -c '.' → satır sayısı
+                m = re.match(r"(\d+)", cikti.strip())
+                return bool(m) and int(m.group(1)) == gercek_satir
+            # head/tail: çıktıdaki her satır dosyada var olmalı
+            cikti_satir = [s for s in cikti.splitlines() if s.strip()]
+            if not cikti_satir:
+                return False
+            try:
+                with open(h["yol"], "r", errors="replace") as f:
+                    icerik = f.read()
+            except OSError:
+                return False
+            return all(s in icerik for s in cikti_satir)
+
+        if tip == "LOG_OKU":
+            # Log dosyası: tail son N satır, head ilk N satır.
+            # Doğrulayıcı: dosyayı doğrudan oku, satırları karşılaştır.
+            try:
+                with open(h["yol"], "r", errors="replace") as f:
+                    tum_satir = f.readlines()
+            except OSError:
+                return False
+            if not tum_satir:
+                return False
+            argv0 = (argv or [None])[0]
+            if argv0 == "tail":
+                # son 10 satır: dosyadan doğrudan oku
+                gercek = [s.rstrip("\n") for s in tum_satir[-10:]]
+            elif argv0 == "head":
+                # ilk 5 satır
+                gercek = [s.rstrip("\n") for s in tum_satir[:5]]
+            else:
+                return False
+            cikti_satir = [s for s in cikti.splitlines() if s.strip()]
+            # Çıktı, gerçeğin son kısmıyla eşleşmeli
+            return (len(cikti_satir) > 0
+                    and all(any(cs in gs or gs in cs
+                                for gs in gercek)
+                            for cs in cikti_satir))
+
+        if tip == "PORTA_DINLE":
+            # Port dinleme: ss -tlnp çıktısında LISTEN satırları var mı?
+            # Doğrulayıcı: /proc/net/tcp'den LISTEN (durum 0A) sayısı.
+            argv0 = (argv or [None])[0]
+            if argv0 == "ss":
+                # ss çıktısında LISTEN var mı?
+                return "LISTEN" in cikti and cikti.strip() != ""
+            if argv0 == "ps":
+                # ps süreç listesi: her zaman bir şey döner
+                # ama port bilgisi vermez → yanlış kapı
+                return False
             return False
 
         return False
-
-    # ---------- alt süreç ----------
 
     def _kos(self, argv, sure=None):
         # stdin = ara bellek (zincir Aşama 2): dosya argv'li komutlar

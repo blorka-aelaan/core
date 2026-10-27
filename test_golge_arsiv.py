@@ -90,8 +90,169 @@ def test_gunduz_konsolide_cagrisi():
         assert k in b.w, "instinkt korunmalı (budanmaz)"
 
 
+
+
+def test_arsiv_retansiyon_gun_siniri():
+    """Retansiyon: N gunden eski arsiv dosyalari silinir, yeni kalir."""
+    import os
+    import shutil
+    import tempfile
+    import time
+    sys.path.insert(0, "/home/emrah/Genel/core")
+    import journal as J
+
+    d = tempfile.mkdtemp()
+    ars = os.path.join(d, "arsiv")
+    os.makedirs(ars)
+    try:
+        def yaz(ad, boyut, gun_once):
+            ts = time.time() - gun_once * 86400
+            isim = "%s_%s.jsonl" % (ad, time.strftime(
+                "%Y%m%d_%H%M%S", time.localtime(ts)))
+            with open(os.path.join(ars, isim), "wb") as f:
+                f.write(b"x" * boyut)
+
+        yaz("journal", 1000, 100)     # eski -> silinir
+        yaz("journal", 2000, 90)      # eski -> silinir
+        yaz("journal", 3000, 10)      # yeni -> kalir
+        # desenle eslesmeyen dosya: ASLA dokunulmaz
+        kanit = os.path.join(ars, "kanit_gecmis.jsonl")
+        with open(kanit, "w", encoding="utf-8") as f:
+            f.write("korunur")
+
+        n = J.arsiv_temizle(ars, max_gun=30, toplam_mb=2048, korunacak=50)
+        assert n == 2, n
+        assert os.path.exists(kanit), "desen disi dosya silinmemeli"
+        assert len(os.listdir(ars)) == 2, os.listdir(ars)
+    finally:
+        shutil.rmtree(d)
+
+
+def test_arsiv_retansiyon_toplam_boyut():
+    """Retansiyon: toplam boyut siniri asilirsa en eskiler silinir."""
+    import os
+    import shutil
+    import tempfile
+    import time
+    sys.path.insert(0, "/home/emrah/Genel/core")
+    import journal as J
+
+    d = tempfile.mkdtemp()
+    ars = os.path.join(d, "arsiv")
+    os.makedirs(ars)
+    try:
+        def yaz(ad, boyut, gun_once):
+            ts = time.time() - gun_once * 86400
+            isim = "%s_%s.jsonl" % (ad, time.strftime(
+                "%Y%m%d_%H%M%S", time.localtime(ts)))
+            with open(os.path.join(ars, isim), "wb") as f:
+                f.write(b"x" * boyut)
+
+        for i in range(6):
+            yaz("journal", 1_000_000, 6 - i)
+        n = J.arsiv_temizle(ars, max_gun=None, toplam_mb=3, korunacak=1)
+        assert n == 3, n
+        assert len(os.listdir(ars)) == 3, os.listdir(ars)
+    finally:
+        shutil.rmtree(d)
+
+
+def test_arsiv_retansiyon_korunacak():
+    """Retansiyon: en yeni N dosya (korunacak) hicbir zaman silinmez."""
+    import os
+    import shutil
+    import tempfile
+    import time
+    sys.path.insert(0, "/home/emrah/Genel/core")
+    import journal as J
+
+    d = tempfile.mkdtemp()
+    ars = os.path.join(d, "arsiv")
+    os.makedirs(ars)
+    try:
+        def yaz(ad, boyut, gun_once):
+            ts = time.time() - gun_once * 86400
+            isim = "%s_%s.jsonl" % (ad, time.strftime(
+                "%Y%m%d_%H%M%S", time.localtime(ts)))
+            with open(os.path.join(ars, isim), "wb") as f:
+                f.write(b"x" * boyut)
+
+        for i in range(6):
+            yaz("journal", 1_000_000, 6 - i)
+        n = J.arsiv_temizle(ars, max_gun=None, toplam_mb=1, korunacak=3)
+        assert len(os.listdir(ars)) == 3, os.listdir(ars)
+    finally:
+        shutil.rmtree(d)
+
+
+def test_arsiv_ayarlari_body_json():
+    """body.json -> stage retansiyon ayarlari gorunur."""
+    cfg = json.loads((Path("/home/emrah/Genel/core/body.json")).read_text(
+        encoding="utf-8"))
+    assert int(cfg["stage"].get("arsiv_azami_gun", 0)) > 0
+    assert int(cfg["stage"].get("arsiv_azami_mb", 0)) > 0
+
+
+def test_retansiyon_arsivlemeden_bagimsiz_calisir():
+    """Retansiyon tetigi arsivlemeye bagli olmamali (periyodik blok).
+
+    Arşiv 2048 MB sınırı, arşivleme olmadan aşılırsa (günlük ~106 MB
+    üretim → 19 günde aşılır) limit kendiliğinden korunamaz. Periyodik
+    blok (main.py, 1000 tikte bir) arşivlemeyi beklemez.
+    """
+    import os
+    import shutil
+    import tempfile
+    import time
+    sys.path.insert(0, "/home/emrah/Genel/core")
+    import journal as J
+
+    d = tempfile.mkdtemp()
+    ars = os.path.join(d, "arsiv")
+    os.makedirs(ars)
+    try:
+        # YENI ama eski olmayan dosyalar: gun siniri degil, TOPLAM BOYUT
+        # siniri tetikler. Arşivleme olmadan da temizlenmeli.
+        def yaz(ad, boyut, gun_once):
+            ts = time.time() - gun_once * 86400
+            isim = "%s_%s.jsonl" % (ad, time.strftime(
+                "%Y%m%d_%H%M%S", time.localtime(ts)))
+            with open(os.path.join(ars, isim), "wb") as f:
+                f.write(b"x" * boyut)
+
+        for i in range(5):
+            yaz("journal", 1_000_000, 2 - i * 0.2)   # hepsi 30 gunden yeni
+        n = J.arsiv_temizle(ars, max_gun=30, toplam_mb=2, korunacak=1)
+        assert n == 3, "toplam boyut siniri arsivlemeden da tetiklenmeli: %s" % n
+        assert len(os.listdir(ars)) == 2, os.listdir(ars)
+    finally:
+        shutil.rmtree(d)
+
+
+def test_main_periyodik_retansiyon_blogu():
+    """main.py: periyodik retansiyon blogu var ve dogru dizinleri kapsar."""
+    src = (Path("/home/emrah/Genel/core/main.py")).read_text(encoding="utf-8")
+    assert "arsiv_temizle" in src, "main.py retansiyon cagrisi icermeli"
+    # Periyodik tetikleme: arsivlemeden bagimsiz, %1000'de bir
+    assert "arsiv_retansiyon" in src
+    assert 'state["ticks"] % 1000 == 0' in src, \
+        "periyodik retansiyon blogu eksik (1000 tikte bir)"
+    # Retansiyon, arşivlenen dosyanin GERCEK hedef dizininde uygulanmali
+    # (sabit ROOT/arsiv yerine) — GOLGE_LOG farkli dizini gosterebilir.
+    assert "str(Path(hedef).parent)" in src, \
+        "retansiyon arsivlenen dosyanin hedef dizininde olmali"
+    assert 'str(ROOT / "arsiv")' not in src, \
+        "sabit ROOT/arsiv dizini kullanilmamali"
+
+
 test_arsivle_golge_deseni()
 test_log_tum_arsiv_ve_canli()
 test_golge_azami_okunur()
 test_gunduz_konsolide_cagrisi()
-print("GOLGE ARSIV + GUNDUZ KONSOLIDASYON: 4/4 OK")
+test_arsiv_retansiyon_gun_siniri()
+test_arsiv_retansiyon_toplam_boyut()
+test_arsiv_retansiyon_korunacak()
+test_arsiv_ayarlari_body_json()
+test_retansiyon_arsivlemeden_bagimsiz_calisir()
+test_main_periyodik_retansiyon_blogu()
+print("GOLGE ARSIV + GUNDUZ KONSOLIDASYON + RETANSIYON: 10/10 OK")

@@ -1,0 +1,14 @@
+Initial state:
+  mevcut_hedef: None
+  hedef_talimat: None
+  rapor: {'aktif_hedef': None, 'sureci_tik': 0, 'novel_ortalama': 0.0, 'merak_ortalama': 0.0, 'gecmis_sayisi': 0}
+
+After guncelle (novel=0.6, merak=0.4):
+  yeni_hedef: True
+  mevcut_hedef: keşif
+  hedef_talimat: ['keşif']
+  rapor: {'aktif_hedef': 'keşif', 'sureci_tik': 1, 'novel_ortalama': 0.6, 'merak_ortalama': 0.4, 'gecmis_sayisi': 1}
+
+After second guncelle:
+  yeni_hedef: False
+  mevcut_hedef: keşif

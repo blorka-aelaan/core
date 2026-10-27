@@ -1,0 +1,26 @@
+[Unit]
+Description=CORE ag.py — ağ/süreç gözlemcisi (FAZ 1-2)
+Documentation=file:///home/emrah/Genel/core/README.md
+# Organizma (core.service) başlamadan önce ag başlasın — veri taze olsun.
+# core.service'e bağımlılık kurmak istemiyorsanız Wants/After'ı kaldırın.
+After=network.target
+
+[Service]
+Type=simple
+# ag.py tüm kullanıcıların /proc/PID/exe dosyalarını okuyabilmek için root gerektirir.
+User=root
+WorkingDirectory=/home/emrah/Genel/core
+ExecStart=/usr/bin/python3 /home/emrah/Genel/core/ag.py
+# stdout hem journald'ye hem ag.log'a gitsin: organizma ag.log'u okuyarak
+# ag'nin canlı olup olmadığını tespit eder (journal.jsonl büyüdüğünde
+# ag_gozlem kaydı blok dışına çıkabilir; ag.log daha küçük ve hızlı).
+# Çökerse 10 saniye sonra yeniden başlat (veri kaybını en aza indir).
+Restart=on-failure
+RestartSec=10
+# append: systemd v240+ ile desteklenir (Debian Buster+).
+StandardOutput=append:/home/emrah/Genel/core/ag.log
+StandardError=append:/home/emrah/Genel/core/ag.log
+SyslogIdentifier=core-ag
+
+[Install]
+WantedBy=multi-user.target

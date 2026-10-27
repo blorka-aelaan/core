@@ -7,11 +7,11 @@ Kontroller (fixture'lar 2026-10-15 canlı yakalamadan: nmap/ping/ip):
    idari red (dosya değişimi) ANINDA geçerli — restart gerekmez
 4) Aday üretimi: 192.168.1.0/24 (254) + 127.0.0.1 (döngü tek aday),
    soğuma aynı ip'yi ikinci seçimde dışlar (least-tried + cooldown)
-5) _harita kapıları: nmap/ping argv'si hız/süre limitli; 'ip' kapısı
+5) _harita kapıları: nmap/ping/traceroute argv'si hız/süre limitli; 'ip' kapısı
    yalnızca komsu_var (kanıt) varken; kapsam dışı → kapı YOK
 6) _dogrula fixture'ları: nmap/ping/ip çıktıları zemin gerçeğiyle
    eşleşince kazanç; uyuşmazlık/kanıt yoksa asla kazanç
-7) maske = {cmd:nmap, cmd:ping[, cmd:ip]}; _hedef_kur AG_TARA üretir
+7) maske = {cmd:nmap, cmd:ping[, cmd:ip][, cmd:traceroute]}; _hedef_kur AG_TARA üretir
 8) duraklama: 3. başarısızlık → duraklama kanıtı + hedef tazelenir;
    başarıda duraklama YOK, ödül ODUL
 9) kapsam kilitliyken uygula ["true"] çalıştırır (nmap ASLA çalışmaz)
@@ -152,7 +152,7 @@ print("4 adaylar (255) + soğuma + least-tried OK")
 k = yeni_kullan()
 h = {"tip": "AG_TARA", "ip": "192.168.1.1", "komsu_var": True}
 harita = k._harita(h)
-assert set(harita) == {"nmap", "ping", "ip"}, harita
+assert set(harita) == {"nmap", "ping", "ip", "traceroute"}, harita
 nm = harita["nmap"]
 assert nm[0] == "nmap" and "-sn" in nm and "-n" in nm and nm[-1] == "192.168.1.1"
 assert "--max-rate" in nm and "--host-timeout" in nm
@@ -162,7 +162,7 @@ assert pg[0] == "ping" and "-c" in pg and "-W" in pg and pg[-1] == "192.168.1.1"
 assert harita["ip"] == ["ip", "neigh", "show", "192.168.1.1"]
 # kanıt yokken ARP kapısı hiç sorulmaz (örnek kapısı mantığı)
 h2 = dict(h, komsu_var=False)
-assert set(k._harita(h2)) == {"nmap", "ping"}, k._harita(h2)
+assert set(k._harita(h2)) == {"nmap", "ping", "traceroute"}, k._harita(h2)
 # kapsam dışı / kapsam kilitli → HİÇ kapı yok (argv ["true"]'ye düşer)
 assert k._harita({"tip": "AG_TARA", "ip": "8.8.8.8",
                   "komsu_var": True}) == {}
@@ -205,16 +205,16 @@ print("6 yargı: nmap/ping/ip × canlı/ölü/kanıt-yok + kapsam dışı OK")
 # 7) maske tek kaynaktan + _hedef_kur AG_TARA üretir
 k = yeni_kullan()
 k.hedef = {"tip": "AG_TARA", "ip": "192.168.1.1", "komsu_var": True}
-assert set(k.eylemler()) == {"cmd:nmap", "cmd:ping", "cmd:ip"}, k.eylemler()
+assert set(k.eylemler()) == {"cmd:nmap", "cmd:ping", "cmd:ip", "cmd:traceroute"}, k.eylemler()
 k.hedef = dict(k.hedef, komsu_var=False)
-assert set(k.eylemler()) == {"cmd:nmap", "cmd:ping"}, k.eylemler()
+assert set(k.eylemler()) == {"cmd:nmap", "cmd:ping", "cmd:traceroute"}, k.eylemler()
 # telafi: diğer tüm kurucular None dönerse AG_TARA sıradaki hedef
 k = yeni_kullan()
 for ad in ("_h_dosya_bul", "_h_paket_sor", "_h_dizin_liste", "_h_dosya_oku",
            "_h_metin_ara", "_h_surec_sor", "_h_servis_sor", "_h_disk_sor",
            "_h_ag_sor", "_h_surec_say", "_h_dosya_say", "_h_dosya_olc",
            "_h_paket_versiyon", "_h_beni_tara", "_h_dosya_ozet", "_h_dosya_ham",
-           "_h_sistem_sor"):
+           "_h_sistem_sor", "_h_konfig_oku", "_h_log_oku", "_h_porta_dinle"):
     setattr(k, ad, lambda: None)
 h = k._hedef_kur()
 assert h and h["tip"] == "AG_TARA", h
@@ -301,7 +301,7 @@ assert hm["nmap"][-1] == "127.0.0.1"         # döngü; dış IP asla yok
 assert hm["ss"][:3] == ["ss", "-Htan", "state"]
 assert hm["curl"][-1].startswith("http://127.0.0.1:")
 k.hedef = hb
-assert set(k.eylemler()) == {"cmd:nmap", "cmd:ss", "cmd:curl"}, k.eylemler()
+assert set(k.eylemler()) == {"cmd:nmap", "cmd:ss", "cmd:curl", "cmd:traceroute"}, k.eylemler()
 # ben_http_port=0 → curl kapısı YOK (maske tek kaynaktan; temp kök:
 # _ag_kapali her çağrıda kapsamı dosyadan tazeler → monkeypatch boştur)
 bos2 = tempfile.mkdtemp(prefix="ag_kapsam_")
@@ -309,7 +309,7 @@ with open(os.path.join(bos2, "ag_kapsam.json"), "w") as f:
     json.dump({"acik": True, "izin_aglari": ["127.0.0.0/8"],
                "ben_tarama": True, "ben_http_port": 0}, f)
 k2 = K.Kullan({}, root=bos2)
-assert set(k2._harita(hb)) == {"nmap", "ss"}, k2._harita(hb)
+assert set(k2._harita(hb)) == {"nmap", "ss", "traceroute"}, k2._harita(hb)
 # ben_tarama:false (açık kapsam) → kapı YOK
 bos3 = tempfile.mkdtemp(prefix="ag_kapsam_")
 with open(os.path.join(bos3, "ag_kapsam.json"), "w") as f:
@@ -323,7 +323,7 @@ for ad in ("_h_dosya_bul", "_h_paket_sor", "_h_dizin_liste", "_h_dosya_oku",
            "_h_metin_ara", "_h_surec_sor", "_h_servis_sor", "_h_disk_sor",
            "_h_ag_sor", "_h_surec_say", "_h_dosya_say", "_h_dosya_olc",
            "_h_paket_versiyon", "_h_ag_tara", "_h_dosya_ozet", "_h_dosya_ham",
-           "_h_sistem_sor"):
+           "_h_sistem_sor", "_h_konfig_oku", "_h_log_oku", "_h_porta_dinle"):
     setattr(k, ad, lambda: None)
 hb2 = k._hedef_kur()
 assert hb2 and hb2["tip"] == "BENI_TARA", hb2

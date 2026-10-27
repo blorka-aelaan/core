@@ -1,6 +1,14 @@
 import json
+import sys
+from pathlib import Path
 
-d = json.load(open('zeka/brain.json'))
+yol = Path('zeka/brain.json')
+if not yol.exists():
+    print('zeka/brain.json bulunamadı — organizma hiç başlatılmamış olabilir.')
+    sys.exit(1)
+
+with open(yol, encoding='utf-8') as f:
+    d = json.load(f)
 ls = d['links']
 zayif = [l for l in ls if abs(l[2]) < 0.02]
 print('toplam link:', len(ls))

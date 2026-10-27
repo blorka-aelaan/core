@@ -27,6 +27,8 @@ TALEP_MD = KOK / "talepler.md"
 # False ise önce yargı yazmak gerekir (yeni hedef tipi demek).
 ADAY_KOMUTLAR = [
     ("traceroute", "traceroute", "AG_SOR", "paketin yolunu izle", False),
+    ("dig", "dnsutils", "AG_SOR", "DNS çözümleme (sunucu/sayı/adı)", True),
+    ("nslookup", "dnsutils", "AG_SOR", "hostname<->IP çözümleme (eski araç)", True),
     ("nstat", "iproute2", "AG_SOR", "ağ istatistiği (SNMP sayaçları)", True),
     ("lnstat", "iproute2", "AG_SOR", "linux netstat /proc/net istatistik", True),
     ("netstat", "net-tools", "AG_SOR", "bağlantı/yönlendirme tablosu", True),

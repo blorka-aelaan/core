@@ -121,8 +121,13 @@ class Uyku:
                                     "hatira": 6,
                                     "konsolide": 6})
         self.tazele = {_ad_duzelt(k): float(v) for k, v in ham.items()}
+        self._meta = None    # MetaOgrenme referansı (set_meta ile kurulur)
         self.son = {}    # ad -> {"t","veri","damga"} (+ hata_t/hata_say/...)
         self.load()
+
+    def set_meta(self, meta):
+        """MetaOgrenme nesnesini kaydet: uyku sırasında lr/epsilon override."""
+        self._meta = meta
 
     def periyot_icin(self, drives=None):
         """Ic denge (homeostaz) ve deneyim aciligina duyarl dinamik uyku
@@ -255,6 +260,9 @@ class Uyku:
         """
         ad = karar["ad"]
         komut, azami = HATLAR[ad]
+        # Meta-öğrenmeye uyku başlıyor
+        if self._meta is not None:
+            self._meta.uyku_basla()
         t0 = time.time()
         ornek = None
         if komut is None:
@@ -301,6 +309,9 @@ class Uyku:
                                       HATA_TAVAN)
             self.son[ad] = kayit
         self.save()
+        # Meta-öğrenmeye uyku bitti
+        if self._meta is not None:
+            self._meta.uyku_bitir()
         sonuc = {"ad": ad, "kod": kod, "sure": sure}
         if ornek is not None:
             sonuc["ornek"] = ornek

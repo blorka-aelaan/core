@@ -1,5 +1,13 @@
 import { useEffect, useState } from "react";
 
+// API token'ı sunucu tarafında vite.config.js → define ile enjekte edilir.
+// Yazma uçları (post) bu token'ı "Authorization: Bearer" başlığıyla gönderir.
+const TOKEN = (typeof __CORE_TOKEN__ !== "undefined") ? __CORE_TOKEN__ : "";
+
+function tokenBasliklari() {
+  return TOKEN ? { "Authorization": "Bearer " + TOKEN } : {};
+}
+
 // ---------- yardımcılar ----------
 export async function al(yol, secenek) {
   const r = await fetch("/api" + yol, secenek);
@@ -7,7 +15,7 @@ export async function al(yol, secenek) {
 }
 export async function post(yol, govde) {
   return al(yol, { method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...tokenBasliklari() },
     body: JSON.stringify(govde) });
 }
 export function yuzde(x) { return Math.round((x || 0) * 1000) / 10; }
@@ -94,9 +102,9 @@ export function Vital({ d }) {
         <div><div className="sayi">{s.toFixed(2)}</div>
           <div className="alt">SIKILMA (S)</div></div>
       </div>
-      <Cubuk etiket="enerji" deger={e} maks={150}
+      <Cubuk etiket="enerji" deger={e} maks={450}
         renk={e < 30 ? "var(--kirmizi)" : "var(--yesil)"}
-        sag={e + " / 150"} />
+        sag={e + " / 450"} />
       <Cubuk etiket="açlık" deger={h} maks={100} renk="var(--turuncu)"
         sag={h + " / 100"} />
       <Cubuk etiket="sıkılma" deger={s} maks={1} renk="var(--mor)"
@@ -264,11 +272,15 @@ export function Uzuv({ d }) {
   }
   async function etiketle(comm, exe, sinif) {
     const metin = `${comm} ${exe} |sinif=${sinif}`;
-    const r = await post("/uzuv/etiket", { metin });
-    setNot(r.ok
-      ? `yazıldı: ${metin} → uyku yeniden eğitecek`
-      : `HATA: ${r.cikti || r.hata || "?"}`);
-    if (r.ok) yukle();
+    try {
+      const r = await post("/uzuv/etiket", { metin });
+      setNot(r.ok
+        ? `yazıldı: ${metin} → uyku yeniden eğitecek`
+        : `HATA: ${r.cikti || r.hata || "?"}`);
+      if (r.ok) yukle();
+    } catch (err) {
+      setNot(`HATA: ${err?.message || err}`);
+    }
   }
 
   return (
@@ -349,11 +361,15 @@ export function Ders({ d }) {
 
   async function gonder(e) {
     e.preventDefault();
-    const r = await post("/ders", { hedef, dogrusu });
-    setNot(r.ok
-      ? `işlendi: ${hedef} → ${dogrusu} (${r.islenen} satır işaretlendi)`
-      : `HATA: ${r.hata || r.cikti || "?"}`);
-    if (r.ok) { setHedef(""); setDogrusu(""); yukle(); }
+    try {
+      const r = await post("/ders", { hedef, dogrusu });
+      setNot(r.ok
+        ? `işlendi: ${hedef} → ${dogrusu} (${r.islenen} satır işaretlendi)`
+        : `HATA: ${r.hata || r.cikti || "?"}`);
+      if (r.ok) { setHedef(""); setDogrusu(""); yukle(); }
+    } catch (err) {
+      setNot(`HATA: ${err?.message || err}`);
+    }
   }
 
   return (
@@ -401,8 +417,12 @@ export function Kapi() {
   const [cevap, setCevap] = useState(null);
 
   async function gonder(msg) {
-    const r = await post("/door", { msg });
-    setCevap(r);
+    try {
+      const r = await post("/door", { msg });
+      setCevap(r);
+    } catch (e) {
+      setCevap({ ok: false, hata: String(e) });
+    }
   }
 
   return (
@@ -413,7 +433,7 @@ export function Kapi() {
         <input style={{ maxWidth: 90 }} value={shock}
           onChange={(e) => setShock(e.target.value)} placeholder="şok" />
         <button className="dgm tehlike"
-          onClick={() => gonder("shock:" + shock)}>şok ver</button>
+          onClick={() => gonder("shock:" + (shock || "50"))}>şok ver</button>
         <input value={gorev} onChange={(e) => setGorev(e.target.value)}
           placeholder="gorev: /klasor/yolu" />
         <button className="dgm"

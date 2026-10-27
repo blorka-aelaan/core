@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ust_beyn import (CIKIS_BOYUT, GIZLI_BOYUT, IDX_ACLIK, IDX_MESAJ_VAR,
                       IDX_OLUM_RISK, IDX_TEHLIKE, KOMUT_ACIL_DINLEN,
                       KOMUT_ACIL_YEM, KOMUT_INDEKSI, KOMUT_KAPAT_AG,
-                      KOMUT_KISITLA_DOSYA, KOMUT_SIFIRLA, KOMUT_YOK,
+                      KOMUT_KISITLA_DOSYA, KOMUT_YOK,
                       SINYAL_BOYUT, TinyMLP, UstBeyn)
 
 hata = []
@@ -56,12 +56,6 @@ class _Ust(UstBeyn):
         self.RED_SERI_MAKS = 1
         self.redd_serisi = [0] * CIKIS_BOYUT
         self.redd_cooldown = [0] * CIKIS_BOYUT
-        self.sifirla_noop_serisi = 0
-        self.sifirla_kullanim_sayaci = 0
-        self.SIFIRLA_MAKS_KULLANIM = 1
-        self.sifirla_son_tik = 0
-        self.SIFIRLA_ARALIK = 5
-
 
 ust = _Ust()
 x = np.zeros(SINYAL_BOYUT)
@@ -347,11 +341,6 @@ kontrol(ust_b.komut_uygun_mu(KOMUT_INDEKSI[KOMUT_ACIL_DINLEN], x_tehlike),
         "acil_dinlen tehlike baglaminda uygun sayilmadi")
 kontrol(not ust_b.komut_uygun_mu(KOMUT_INDEKSI[KOMUT_ACIL_DINLEN], x_aclik),
         "acil_dinlen tehlike yokken uygun sayildi")
-# sifirla her koşulda uygun
-kontrol(ust_b.komut_uygun_mu(KOMUT_INDEKSI[KOMUT_SIFIRLA], x_aclik)
-        and ust_b.komut_uygun_mu(KOMUT_INDEKSI[KOMUT_SIFIRLA], x_tehlike),
-        "sifirla her baglamda uygun olmali")
-
 # Bağlamsal kanıt YALNIZCA kendi bağlamında birikir
 ust_b2 = _Ust()
 for _ in range(20):
@@ -573,69 +562,20 @@ _ust_g1 = _Ust()
 _ust_g1.epsilon = 0.0
 _p_g1 = np.zeros(CIKIS_BOYUT)
 _p_g1[KOMUT_INDEKSI[KOMUT_ACIL_YEM]] = 0.275     # uygun
-_p_g1[KOMUT_INDEKSI[KOMUT_SIFIRLA]] = 0.225        # uygun
 _p_g1[KOMUT_INDEKSI[KOMUT_ACIL_DINLEN]] = 0.300     # UYGUNSUZ
 _p_g1[KOMUT_INDEKSI[KOMUT_KAPAT_AG]] = 0.200        # UYGUNSUZ
 _ust_g1.mlp.predict = lambda xv: _p_g1.copy()
 _k_g1, _i_g1, _g_g1, _kay_g1 = _ust_g1.sec(x_aclik2)
 kontrol(_i_g1 == KOMUT_INDEKSI[KOMUT_ACIL_YEM],
         "maskeli secim yanlis: %s" % _i_g1)
-# Maskeli dağılım normalize edilir: p1 = 0.275/0.5 = 0.55,
-# p2 = 0.225/0.5 = 0.45 → marj 0.10 → güven 0.10/0.15 = 0.667.
-kontrol(abs(_g_g1 - 0.10 / 0.15) < 1e-6,
+# Maskeli dağılım normalize edilir: tek uygun komut → p1 = 1.0, p2 = 0
+# → marj 1.0 → güven 1.0.
+kontrol(abs(_g_g1 - 1.0) < 1e-6,
         "marj uygunsuz komutlardan etkileniyor: %s (beklenen %s)"
-        % (_g_g1, 0.10 / 0.15))
-# Ham (normalize edilmemiş) dağılımda marj 0.275-0.225 = 0.05
-# olurdu; uygunsuz komut rakip sayılsaydı 0'a düşerdi. Bu
-# değer eşiğin ALTINDA kalır → kilitlenme. Doğru değer üstte.
-
-# --- 22) SIFIRLA: HER KOŞULDA UYGUN, GLOBAL KANIT TAŞIR ---
-# "sifirla" bağlamdan bağımsızdır: kanıtı global birikir ve her
-# bağlamda geçerlidir. Aksi halde b0'daki 0.0'lık kayıt global
-# kanıtı gölgeler ve komut sürekli "dogrulanmadi" ile reddedilir
-# (572 kez — gözlenen hata).
-ust_s1 = _Ust()
-x_sifirla = np.zeros(SINYAL_BOYUT)
-x_sifirla[IDX_ACLIK] = 0.9
-kontrol(ust_s1.komut_uygun_mu(KOMUT_INDEKSI[KOMUT_SIFIRLA], x_sifirla),
-        "sifirla aclik baglaminda uygun sayilmadi")
-kontrol(ust_s1.komut_uygun_mu(KOMUT_INDEKSI[KOMUT_SIFIRLA], x_tehlike),
-        "sifirla tehlike baglaminda uygun sayilmadi")
-_m_s1 = ust_s1.uygun_maske(x_sifirla)
-kontrol(_m_s1[KOMUT_INDEKSI[KOMUT_SIFIRLA]],
-        "sifirla maske disinda kaldi")
-# Kanıt global birikmelidir.
-for _ in range(10):
-    ust_s1.ogren(x_sifirla, KOMUT_INDEKSI[KOMUT_SIFIRLA], 1.0)
-_global_p = ust_s1.dogrulama[KOMUT_INDEKSI[KOMUT_SIFIRLA]]
-kontrol(_global_p >= ust_s1.dogrulama_esigi,
-        "sifirla global kaniti esige ulasmadi: %s" % _global_p)
-# FARKLI bir bağlamda da aynı (global) puan geçerli olmalı.
-_tehlike_sifirla = np.zeros(SINYAL_BOYUT)
-_tehlike_sifirla[IDX_TEHLIKE] = 1.0
-_p_aclik = ust_s1._dogrulama_puani(
-    KOMUT_INDEKSI[KOMUT_SIFIRLA], x_sifirla)
-_p_tehlike = ust_s1._dogrulama_puani(
-    KOMUT_INDEKSI[KOMUT_SIFIRLA], _tehlike_sifirla)
-kontrol(abs(_p_aclik - _p_tehlike) < 1e-9,
-        "sifirla kaniti baglamlar arasinda farkli: %s vs %s"
-        % (_p_aclik, _p_tehlike))
-kontrol(_p_tehlike >= ust_s1.dogrulama_esigi,
-        "sifirla farkli baglamda dogrulanmadi: %s" % _p_tehlike)
-_ok_s1, _gk_s1 = ust_s1.komut_uygulanabilir_mi(
-    KOMUT_INDEKSI[KOMUT_SIFIRLA], 0.9, "model", x_sifirla)
-kontrol(_ok_s1 and _gk_s1 == "onaylandi",
-        "kaniti olan sifirla onaylanmadi: %s %s" % (_ok_s1, _gk_s1))
-# Bağlama bağlı komutun kanıtı ise hâlâ bağlamla sınırlı kalmalı.
-ust_s2 = _Ust()
-for _ in range(20):
-    ust_s2.ogren(x_sifirla, KOMUT_INDEKSI[KOMUT_ACIL_YEM], 1.0)
-kontrol(ust_s2._dogrulama_puani(
-    KOMUT_INDEKSI[KOMUT_ACIL_YEM], x_sifirla) >= ust_s2.dogrulama_esigi,
-    "acil_yem aclik baglaminda dogrulanmadi")
-kontrol(ust_s2._dogrulama_puani(
-    KOMUT_INDEKSI[KOMUT_ACIL_YEM], _tehlike_sifirla) == 0.0,
-    "acil_yem yanlis baglamda dogrulandi (baglam izolasyonu bozuldu)")
+        % (_g_g1, 1.0))
+# Ham dağılımda uygun komut tek olduğu için marj = 0.275 − 0 = 0.275,
+# ama normalize edilmiş dağılımdan hesaplanan marj = 1.0 → güven 1.0.
+# Bu, uygunsuz komutların marjı sıfırlamadığına kanıt.
 
 # --- 23) KEŞİF: 'yok' SEÇİLMEZ, GÜVEN EŞİĞİNİ GEÇMEZ ---
 # Keşif bütçesi kanıt toplamak içindir; "yok"a harcanan her
@@ -894,12 +834,6 @@ kontrol(ust_k._dogrulama_puani(_ay, x_aclik_tehlike)
 kontrol(ust_k._dogrulama_puani(_ay, x_tehlike) == 0.0,
         "acl yokken kanit sifir degil: %s"
         % ust_k._dogrulama_puani(_ay, x_tehlike))
-# sifirla bağlamdan bağımsız → global kanıt.
-_sf = KOMUT_INDEKSI[KOMUT_SIFIRLA]
-kontrol(ust_k.komut_baglam_anahtari(_sf, x_aclik)
-        == ust_k.komut_baglam_anahtari(_sf, x_tehlike),
-        "sifirla baglamdan bagimsiz degil")
-
 if hata:
     print("HATA (%d):" % len(hata))
     for h in hata:

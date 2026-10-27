@@ -13,7 +13,6 @@ MLP (nöron/ağırlık işlemleri): NumPy.
   3: kapat_ag
   4: kisitla_dosya
   5: guvenli_mod
-  6: sifirla
 
 Öğrenme: çevrimiçi (online). Her tikte bir karar alınır, ardından
 gerçek sonuç (ödül) ogren() ile beyine geri verilir ve ağırlıklar
@@ -52,7 +51,7 @@ KOMUT_ACIL_YEM = "acil_yem"
 KOMUT_KAPAT_AG = "kapat_ag"
 KOMUT_KISITLA_DOSYA = "kisitla_dosya"
 KOMUT_GUVENLI_MOD = "guvenli_mod"
-KOMUT_SIFIRLA = "sifirla"
+KOMUT_SIFIRLA = "sifirla"  # Feature #2: World Model + reset komutu
 
 KOMUTLAR = [
     KOMUT_YOK,
@@ -212,7 +211,7 @@ class UstBeyn:
         #
         # DİKKAT: Bu puan GLOBAL'dir — bir komut bir bağlamda işe
         # yaradıysa başka bağlamda da "doğrulanmış" sayılır. Bu,
-        # "sifirla" gibi her koşulda işe yarayan komutlar için sorun
+        # "kapat_ag" gibi her koşulda işe yarayan komutlar için sorun
         # DEĞİLDİR, ama bağlama bağlı komutlar (acil_yem yalnızca
         # açlıkta işe yarar) için yanlış onay üretir: model açlık
         # olmadığında da acil_yem'i onaylayabilir.
@@ -239,11 +238,11 @@ class UstBeyn:
         self.RED_SERI_MAKS = 1            # kaç ardışık reddedilmede cooldown başlar
         self.redd_serisi = [0] * CIKIS_BOYUT   # komut bazlı ardışık reddetme sayısı
         self.redd_cooldown = [0] * CIKIS_BOYUT # komut bazlı cooldown kalan tik
-        self.sifirla_noop_serisi = 0          # sıfırla'nın ardışık budamsız çalışma sayısı
-        self.sifirla_kullanim_sayaci = 0      # son N tikte sıfırlama uygulama sayısı (maksimum kısıt)
-        self.SIFIRLA_MAKS_KULLANIM = 1        # bu sayıya ulaştığında sıfırla maskelenir
-        self.sifirla_son_tik = 0              # son sıfırlama uygulama tiki
-        self.SIFIRLA_ARALIK = 5               # sıfırlama arasında en az bu kadar tik
+
+        # Sıfırla (sifirla) cooldown ve zamanlama
+        self.sifirla_son_tik = 0
+        self.SIFIRLA_ARALIK = 10  # en az 10 tik sonra yeniden sıfırla
+        self.sifirla_noop_serisi = 0
 
         self.samples = 0
         self.tik = 0
@@ -328,7 +327,6 @@ class UstBeyn:
           * guvenli_mod  → "tehlike"     (yalnızca tehlike)
           * kapat_ag     → "tehlike|sok" (tehlike veya sok bekliyor)
           * kisitla_dosya→ "mesaj|tehlike"
-          * sifirla      → bağlamdan bağımsız (global)
           * yok          → bağlamdan bağımsız (pasif)
         """
         x = np.asarray(sinyal_vektor, dtype=float)
@@ -380,7 +378,6 @@ class UstBeyn:
           * guvenli_mod  → ancak TEHLİKE varken
           * kapat_ag     → ancak saldırı/tehlike varken
           * kisitla_dosya→ ancak mesaj/ölüm riski varken
-          * sifirla      → her koşulda
           * yok          → her koşulda
 
         Bu kontrol güvenlik ağının ÖNÜNDE çalışır: koşulu sağlanmayan
@@ -409,28 +406,6 @@ class UstBeyn:
             return tehlike or sok
         if komut_idx == KOMUT_INDEKSI[KOMUT_KISITLA_DOSYA]:
             return mesaj or tehlike
-        if komut_idx == KOMUT_INDEKSI[KOMUT_SIFIRLA]:
-            # "Sifirla" (ölü ağırlık temizliği) HER koşulda
-            # uygulanabilir bir komuttur — bu, onun BAĞLAMDAN
-            # BAĞIMSIZ olduğu anlamına gelir:
-            #   * kanıtı global taşınır (bkz.
-            #     komut_her_kosulda_gecerli_mi),
-            #   * maske onu ASLA dışlamaz.
-            #
-            # NEDEN koşula bağlanmadı? "Sifirla" yalnızca tablo
-            # şiştiğinde işe yarar; ama bu koşulu sinyal
-            # vektöründen güvenilir biçimde OKUMAK mümkün değil
-            # (tablo doluluğu sinyalde birebir kodlanmıyor).
-            # Koşul eklendiğinde, nötr bir durumda maske TAMAMEN
-            # boşalıyor ve model "yok"a düşüyordu → PASİF
-            # KİLİTLENME. Kanıt toplama yolu (keşif) kesildi.
-            #
-            # Doğru çözüm: koşul yerine ÖDÜL KONTROLÜ. "Sifirla"
-            # budama gerçekleşmezse negatif ödül alır (main.py
-            # zaten böyle ödüllendiriyor) → kanıtı düşer → model
-            # onaylamaz. Yani "gereksiz işlem" YANLIŞA çevrilir
-            # ve model bunu ÖĞRENİR, bizim tahminimize gerek yok.
-            return True
         return True
 
     def _dogrulama_puani(self, komut_idx, sinyal_vektor=None):
@@ -449,30 +424,12 @@ class UstBeyn:
 
         Bu yüzden kural şudur:
           * Bağlam için KAYIT varsa  → bağlamsal puan (güçlü kanıt)
-          * Komut HER KOŞULDA geçerliyse (sifirla) → global puan
           * Aksi → 0 (kanıt yok, onaylanmaz)
 
         Böylece yanlış bağlamda onay üretmek yapısal olarak
         imkânsız hâle gelir.
         """
         if sinyal_vektor is not None:
-            # BAĞLAMDAN BAĞIMSIZ komutlar (sifirla) ÖNCE ele alınır.
-            #
-            # NEDEN önce? Bu komutun kanıtı zaten global birikimdir
-            # (her koşulda uygulanabilir). Bağlamsal depoda o komut
-            # için bir KAYIT bulunması, global puanı GİZLEMEZ — sadece
-            # o BAĞLAMDAki kanıtı gösterir. Oysa "sifirla" her
-            # koşulda aynı işi yapar; b0'da 0.0 olan kanıt, b2'deki
-            # 0.408'i veya global birikimi GEÇERSİZ KILMAZ.
-            #
-            # ESKİ DAVRANIŞ (hata): bağlamsal kayıt varsa DİREKT
-            # dönüyordu. Böylece "sifirla"nın b0'daki 0.0'lık kaydı,
-            # global 0.376'lık kanıtı gölgeliyor ve komut bağlam
-            # değiştikçe "dogrulanmadi" ile reddediliyordu (572 kez).
-            #
-            # DOĞRU DAVRANIŞ: bağlamdan bağımsız komut → global puan.
-            if self.komut_her_kosulda_gecerli_mi(komut_idx):
-                return self.dogrulama[komut_idx]
             anahtar = (int(komut_idx),
                        self.komut_baglam_anahtari(komut_idx, sinyal_vektor))
             if anahtar in self.dogrulama_bağlam:
@@ -486,12 +443,10 @@ class UstBeyn:
     def komut_her_kosulda_gecerli_mi(self, komut_idx):
         """Komut HER koşulda geçerli mi (ön koşulu yok mu)?
 
-        "sifirla" her koşulda uygulanabilirdir; onun kanıtı
-        bağlamdan bağımsızdır ve global puanla taşınabilir.
-        Diğer komutların (acil_yem, acil_dinlen, kapat_ag,
-        kisitla_dosya, guvenli_mod) bağlama özgü kanıtı vardır.
+        Sifirla komutu kaldırıldığından artık hiçbir komut
+        koşulsuz geçerli değil — tüm komutların bir ön koşulu vardır.
         """
-        return komut_idx == KOMUT_INDEKSI[KOMUT_SIFIRLA]
+        return False
 
     def uygun_maske(self, sinyal_vektor, yok_da_maskeli=True):
         """Bu bağlamda UYGUN olan komutların boolean maskesi.
@@ -513,8 +468,7 @@ class UstBeyn:
              doğru eşlemeyi öğrenir.
 
         "yok" her zaman maskelenir (model kararı olamaz — pasif
-        kilitlenme koruması) ve "sifirla" her zaman uygundur
-        (maske asla boş kalmaz).
+        kilitlenme koruması).
         """
         maske = np.zeros(CIKIS_BOYUT, dtype=bool)
         for i in range(CIKIS_BOYUT):
@@ -525,24 +479,16 @@ class UstBeyn:
             if self.redd_cooldown[i] > 0:
                 self.redd_cooldown[i] -= 1
                 continue
-            # Sıfırla aşırı kullanım koruması: tek komut hâkimiyetini kırar.
-            if i == KOMUT_INDEKSI[KOMUT_SIFIRLA] and self.sifirla_kullanim_sayaci >= self.SIFIRLA_MAKS_KULLANIM:
-                continue
             if self.komut_uygun_mu(i, sinyal_vektor):
                 maske[i] = True
-        # Eğer sadece 'sıfırla' uygun kalmışsa, diğer komutlardan en az
-        # denenmiş olanı da aç (tek komut hâkimiyetini kırar).
-        if maske.sum() == 1 and maske[KOMUT_INDEKSI[KOMUT_SIFIRLA]]:
-            en_az_denenmis = min(
-                [i for i in range(CIKIS_BOYUT)
-                 if i != KOMUT_INDEKSI[KOMUT_YOK] and
-                 i != KOMUT_INDEKSI[KOMUT_SIFIRLA]],
-                key=lambda i: self.secim_sayilari[i])
-            maske[en_az_denenmis] = True
         if not maske.any():
-            # Beklenmez ama güvenli: "yok"a düş (hiçbir şey yapma).
+            # Hiçbir komut bu bağlamda uygun değil: "yok" güvenli varsayılan.
+            # Pasif kilitlenme koruması: sec() model kararında "yok'u asla
+            # seçmez (bkz. sec()), bu yüzden burada "yok'a düşmek
+            # kilitlenmeye yol açmaz.
             maske[KOMUT_INDEKSI[KOMUT_YOK]] = True
         return maske
+
 
     # --------------------------------------------------------------- Komut seç
     def _guven_hesapla(self, probs, idx):
@@ -614,7 +560,7 @@ class UstBeyn:
             # DENENMEYE DEVAM EDER. Çünkü keşif tam da "bunu
             # denemediğimi bilmiyorum" demektir; maskeyi keşfe
             # uygulamak kanıt toplama yolunu kapatabilirdi
-            # (ör. nötr durumda yalnızca "sifirla" denenirdi).
+            # (ör. nötr durumda yalnızca "kapat_ag" denenirdi).
             _adaylar = [i for i in range(CIKIS_BOYUT)
                         if i != KOMUT_INDEKSI[KOMUT_YOK]]
             if not _adaylar:
@@ -644,16 +590,21 @@ class UstBeyn:
         # Model CEZALANDIRILMAZ (gradyan yok) — sadece doğru
         # davranışa YÖNLENDİRİLİR ("yönlendirme değil ceza").
         maske = self.uygun_maske(x)
-        uygunlar = [i for i in range(CIKIS_BOYUT) if maske[i]]
-        if uygunlar:
-            # Tek komut hâkimiyeti kılıcı: yalnızca "sıfırla" uygun kalmışsa
-            # (diğerleri context'e uygun değilse), marj = 1.0 olur ve
-            # sistem sıfırla'ya kilitlenir. Komutu sıfırla olarak tut ama
-            # güveni 0 yap → komut_uygulanabilir_mi 'guven_yetersiz' ile
-            # reddeder ve cooldown başlar.
-            if len(uygunlar) == 1 and uygunlar[0] == KOMUT_INDEKSI[KOMUT_SIFIRLA]:
-                return (KOMUTLAR[KOMUT_INDEKSI[KOMUT_SIFIRLA]],
-                        KOMUT_INDEKSI[KOMUT_SIFIRLA], 0.0, "model")
+        uygunlar = [i for i in range(CIKIS_BOYUT) if maske[i]
+                    and i != KOMUT_INDEKSI[KOMUT_YOK]]
+        if not uygunlar:
+            # Hiçbir non-"yok" komut bu bağlamda uygun değil: tüm
+            # non-"yok" komutlardan rastgele seç (argmax uniform
+            # dağılımda her zaman ilk indeksi döner → acil_dinlen
+            # gibi komut sonsuza dek seçilirdi).
+            uygunlar = [i for i in range(CIKIS_BOYUT)
+                        if i != KOMUT_INDEKSI[KOMUT_YOK]]
+            idx = int(self.rng.choice(uygunlar))
+            p_maskeli = np.full(CIKIS_BOYUT, 1.0 / len(uygunlar),
+                                dtype=float)
+            p_maskeli[KOMUT_INDEKSI[KOMUT_YOK]] = 0.0
+            toplam = 1.0
+        else:
             # Maskeli olasılıklar: uygun olmayanlar sıfırlanır ve
             # kalanlar yeniden normalize edilir.
             p_maskeli = np.where(maske, probs, 0.0)
@@ -665,23 +616,21 @@ class UstBeyn:
                 toplam = float(p_maskeli.sum())
             p_maskeli = p_maskeli / toplam
             idx = int(np.argmax(p_maskeli))
-            # Marj NORMALİZE EDİLMİŞ dağılımdan hesaplanır.
-            #
-            # NEDEN? Argmax da normalize edilmiş dağılımdan
-            # seçiliyor; marj da aynı dağılımdan gelmeli (tutarlılık).
-            # Normalize edilmemiş (maskelenmiş) dağılımda toplam
-            # 1'den küçüktür: maske %70 olasılık kütle elediyse marj
-            # 0.7 ile çarpılır → yapay olarak küçük görünür → model
-            # eşiği zor geçer. Bu, maskenin ÇÖZMEYE çalıştığı
-            # "marj tavanlanması" sorununun ta kendisidir.
-            #
-            # Normalize edilmiş dağılımda p1-p2, DAĞILIM İÇİNDEKİ
-            # gerçek farkı ölçer: "uygun komutlar arasında ne kadar
-            # belirgin bir tercih var?"
-            p_guven = p_maskeli
-        else:
-            idx = KOMUT_INDEKSI[KOMUT_YOK]
-            p_guven = np.where(maske, probs, 0.0)
+
+        # Marj NORMALİZE EDİLMİŞ dağılımdan hesaplanır.
+        #
+        # NEDEN? Argmax da normalize edilmiş dağılımdan
+        # seçiliyor; marj da aynı dağılımdan gelmeli (tutarlılık).
+        # Normalize edilmemiş (maskelenmiş) dağılımda toplam
+        # 1'den küçüktür: maske %70 olasılık kütle elediyse marj
+        # 0.7 ile çarpılır → yapay olarak küçük görünür → model
+        # eşiği zor geçer. Bu, maskenin ÇÖZMEYE çalıştığı
+        # "marj tavanlanması" sorununun ta kendisidir.
+        #
+        # Normalize edilmiş dağılımda p1-p2, DAĞILIM İÇİNDEKİ
+        # gerçek farkı ölçer: "uygun komutlar arasında ne kadar
+        # belirgin bir tercih var?"
+        p_guven = p_maskeli
         return (KOMUTLAR[idx], idx,
                 self._guven_hesapla(p_guven, idx), "model")
 
@@ -711,6 +660,13 @@ class UstBeyn:
         if komut_idx == KOMUT_INDEKSI[KOMUT_YOK]:
             return True, "yok"
         if kaynak == "kesif":
+            # Keşif komutları bağlamsal olarak geçerli olmalı:
+            # tehlike yokken "acil_dinlen" keşifle de çalıştırılmamalı,
+            # aksi halde enerji boşa harcanır ve sistem sürekli
+            # "dinleniyor" moduna girer.
+            if sinyal_vektor is not None and not self.komut_uygun_mu(
+                    komut_idx, sinyal_vektor):
+                return False, "kesif_gecersiz"
             return True, "kesif_deneme"
         # ÖN KOŞUL KONTROLÜ: komutun bu bağlamda anlamlı olup
         # olmadığı. Koşul sağlanmıyorsa komut doğrulanmış olsa bile
@@ -790,13 +746,6 @@ class UstBeyn:
             # serisini sıfırla → tekrar denenebilir.
             self.redd_serisi[komut_indeksi] = 0
             self.redd_cooldown[komut_indeksi] = 0
-            # Sıfırla kullanım sayacını yönet (maksimum kısıt için).
-            # Başarılı sıfırlama sayacıyı sıfırlar; başarısızsa artırır.
-            if komut_indeksi == KOMUT_INDEKSI[KOMUT_SIFIRLA]:
-                if odul > 0:
-                    self.sifirla_kullanim_sayaci = 0
-                else:
-                    self.sifirla_kullanim_sayaci += 1
             self.samples += 1
             self.tik += 1
             self.odul_gecmisi.append(odul)
@@ -853,7 +802,7 @@ class UstBeyn:
                 #
                 # ÇÖZÜM: pay, o bağlamda olumlu kanıtı OLAN uygun
                 # komutlara yoğunlaşır. Kanıtı olmayan uygun
-                # komutlar (ör. henüz denenmemiş "sifirla") minimum
+                # komutlar (ör. henüz denenmemiş komutlar) minimum
                 # pay alır. Böylece:
                 #   * seçilen komut HEDEFTE belirgin biçimde öne çıkar,
                 #   * marj gerçekten büyür,
@@ -1012,9 +961,6 @@ class UstBeyn:
             return 0
         self.reddedilen_sayilari[komut_indeksi] += 1
         self.redd_serisi[komut_indeksi] += 1
-        # Reddedilse de komut "denendi" sayılır: sıfırla kullanım sayacı.
-        if komut_indeksi == KOMUT_INDEKSI[KOMUT_SIFIRLA]:
-            self.sifirla_kullanim_sayaci += 1
         if self.redd_serisi[komut_indeksi] >= self.RED_SERI_MAKS:
             # Aynı komut ardışık olarak RED_SERI_MAKS kez reddedildi:
             # bir süre dışarıda tut (diğer komutlar denensin).
@@ -1084,16 +1030,41 @@ class UstBeyn:
             return 0
         try:
             data = json.loads(yol.read_text(encoding="utf-8"))
+            W2 = np.array(data["W2"], dtype=float)
+            b2 = np.array(data["b2"], dtype=float)
+            # Eski kayıtta sifirla (7. çıktı) varsa ve CIKIS_BOYUT=6 ise,
+            # sondaki satırı/elemanı kes — sifirla komutu kaldırıldı.
+            if W2.shape[0] > CIKIS_BOYUT:
+                W2 = W2[:CIKIS_BOYUT, :]
+                b2 = b2[:CIKIS_BOYUT]
+            elif W2.shape[0] < CIKIS_BOYUT:
+                # Model eski (6 çıktı) ama sifirla eklendi → sıfır padding
+                pad = CIKIS_BOYUT - W2.shape[0]
+                W2 = np.vstack([W2, np.zeros((pad, W2.shape[1]))])
+                b2 = np.concatenate([b2, np.zeros(pad)])
             self.mlp.W1 = np.array(data["W1"], dtype=float)
             self.mlp.b1 = np.array(data["b1"], dtype=float)
-            self.mlp.W2 = np.array(data["W2"], dtype=float)
-            self.mlp.b2 = np.array(data["b2"], dtype=float)
+            self.mlp.W2 = W2
+            self.mlp.b2 = b2
             self.samples = data.get("samples", 0)
             self.tik = data.get("tik", 0)
             self.epsilon = data.get("epsilon", self.epsilon)
-            self.secim_sayilari = data.get("secim_sayilari",
-                                          [0] * CIKIS_BOYUT)
-            self.dogrulama = data.get("dogrulama", [0.0] * CIKIS_BOYUT)
+            secim = data.get("secim_sayilari", None)
+            if secim is not None:
+                if len(secim) > CIKIS_BOYUT:
+                    secim = secim[:CIKIS_BOYUT]
+                elif len(secim) < CIKIS_BOYUT:
+                    # Eski kayıt (6 elemanlı, sifirla eksik) → sıfır padding
+                    secim = secim + [0] * (CIKIS_BOYUT - len(secim))
+            self.secim_sayilari = secim or [0] * CIKIS_BOYUT
+            dogr = data.get("dogrulama", None)
+            if dogr is not None:
+                if len(dogr) > CIKIS_BOYUT:
+                    dogr = dogr[:CIKIS_BOYUT]
+                elif len(dogr) < CIKIS_BOYUT:
+                    # Eski kayıt (6 elemanlı, sifirla eksik) → sıfır padding
+                    dogr = dogr + [0.0] * (CIKIS_BOYUT - len(dogr))
+            self.dogrulama = dogr or [0.0] * CIKIS_BOYUT
             # Bağlam bazlı puanlar geri yüklenir. ESKİ kayıtlarda bu
             # alan YOKTUR → geriye dönük uyum için boş bırakılır
             # (global puan kullanılır, davranış bozulmaz).

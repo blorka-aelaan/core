@@ -75,6 +75,59 @@ class UzunVadePlan:
         return self.i >= len(self.adimlar)
 
 
+
+class Option:
+    """Bir seçenek (geçici alt-politika): birden fazla tik boyunca aktif olur.
+
+    Örnekler:
+    - "yemek": hungry > threshold'a kadar wander, sonra eat
+    - "kapali_ag": kapat_ag komutunun başarılı olana kadar tekrar dene
+    - "dizin_tarasa": belirli derinlikte klasör tara
+
+    Attributes:
+        ad: seçeneğin adı
+        max_tik: maksimum tik sayısı bu seçenek aktif kalabilir
+        adim_fonksiyonu: her tikte ne yapacağını belirleyen fonksiyon
+        tamamlandi: seçenek başarıyla tamamlandı mı
+        tik: seçeneğin başladığı tik
+    """
+
+    def __init__(self, ad, max_tik=None, adim_fonksiyonu=None):
+        self.ad = ad
+        self.max_tik = max_tik  # None = sürekli
+        self.adim_fonksiyonu = adim_fonksiyonu  # (body, drives, option) -> action
+        self.tamamlandi = False
+        self.tik = None  # Başlangıç tik'i
+
+    def baslat(self, tik):
+        """Seçeneği başlat."""
+        self.tik = tik
+        self.tamamlandi = False
+
+    def guncelle(self, tik, body, drives):
+        """Seçeneği güncelle. Her tik çağrılır."""
+        if self.tik is None:
+            self.baslat(tik)
+
+        # Max tik kontrolü
+        if self.max_tik is not None and (tik - self.tik) >= self.max_tik:
+            self.tamamlandi = True
+            return
+
+        # Adım fonksiyonunu uygula
+        if self.adim_fonksiyonu:
+            action = self.adim_fonksiyonu(body, drives, self)
+            if action is not None:
+                return action
+
+        # Öntanımlı: tamamlandı olarak işaretle
+        self.tamamlandi = True
+
+    def bitti(self):
+        """Seçeneğin bitip bitmediğini kontrol et."""
+        return self.tamamlandi
+
+
 class Tezgah:
     def __init__(self, cfg, body, jour):
         self.cfg = cfg or {}

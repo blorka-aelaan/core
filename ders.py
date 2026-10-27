@@ -259,3 +259,37 @@ def oku(mind, jour, yol=None, beyaz=()):
         except OSError:
             pass
     return islenen, atlanan
+
+
+def ozet(yol=None):
+    """Defterdeki bekleyen (işaretlenmemiş ve düzeltme yazılmış) satır
+    sayısını döndür → (bekleyen, toplam_acik).
+
+    bekleyen  : insan |dogrusu= yazmış ama organizma henüz |ok=1
+                yazmamış — bir sonraki ders.oku() çağrısında işlenecek.
+    toplam_acik: hiç düzeltme yazılmamış ham hata satırları —
+                 insan müdahalesi bekleniyor.
+
+    Bu sayıları periyodik journal kaydına yazmak, `door.py watch` ile
+    takip edilmesini sağlar: insan ne kadar bekliyor?
+    """
+    p = _yol(yol)
+    if not p.exists():
+        return 0, 0
+    try:
+        satirlar = p.read_text(encoding="utf-8").splitlines()
+    except (OSError, ValueError):
+        return 0, 0
+    bekleyen = 0
+    acik = 0
+    for satir in satirlar:
+        if not satir.strip():
+            continue
+        kayit, dogrusu, islenmis = _ayristir(satir)
+        if kayit is None or islenmis:
+            continue
+        if dogrusu:
+            bekleyen += 1   # düzeltme var, henüz işlenmedi
+        else:
+            acik += 1       # ham hata — insan düzeltmesi bekleniyor
+    return bekleyen, acik

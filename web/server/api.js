@@ -4,6 +4,9 @@
 // yazma işlemleri kendi Python araçlarıyla (uzuv.py / ders.py) olur.
 import net from "node:net";
 import { execFile } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
 import {
   ROOT, baslat, onYayin, durum, halkaSon, dersOrnekleri,
 } from "./veri.js";
@@ -11,6 +14,44 @@ import {
 const DOOR = { host: "127.0.0.1", port: 5777 };
 const kiler = new Set();
 let kuruldu = false;
+
+// ---------- kimlik doğrulama ----------
+// GÜVENLİK: yazma/yönetim uçları (/manage, /door, /uzuv/etiket, /ders)
+// kimlik doğrulamasız çalıştığında LAN'daki herkes süreci öldürebiliyor
+// (/manage → sudo systemctl kill) ve organizmaya komut yazabiliyordu.
+// Çözüm: gizli bir token. Token dosyası 0600 izinle, kullanıcı dizininde
+// tutulur ve Vite ortam değişkeniyle sunucuya verilir.
+//
+// Token YOKSA: sunucu yazma uçlarını TAMAMEN kapatır (fail-closed).
+// Böylece yanlışlıkla LAN'a açıldığında bile yazma yok.
+const TOKEN_DOSYA = process.env.CORE_API_TOKEN_FILE
+  || path.join(process.env.HOME || "/root", ".core", "api_token");
+const TOKEN = process.env.CORE_API_TOKEN || "";
+
+function tokenYukle() {
+  if (TOKEN) return TOKEN.trim();
+  try {
+    return fs.readFileSync(TOKEN_DOSYA, "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+function istekYetkili(req) {
+  // Token yoksa HİÇBİR yazma ucu çalışmaz (fail-closed).
+  const t = tokenYukle();
+  if (!t) return false;
+  const hdr = String(req.headers["authorization"] || "");
+  const h = hdr.startsWith("Bearer ") ? hdr.slice(7).trim() : "";
+  const q = String(req.headers["x-core-token"] || "");
+  const gelen = h || q;
+  if (!gelen) return false;
+  // Sabit-zamanlı karşılaştırma (timing attack koruması).
+  const a = Buffer.from(gelen);
+  const b = Buffer.from(t);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
 
 function json(res, kod, veri) {
   res.writeHead(kod, { "Content-Type": "application/json; charset=utf-8",
@@ -51,7 +92,7 @@ async function servisler() {
   }
   const v = {};
   await Promise.all([
-    ["organizma", "core-organizma.service"],
+    ["organizma", "core.service"],
     ["ag", "core-ag.service"],
   ].map(async ([ad, b]) => {
     const [a, p] = await Promise.all([
@@ -143,6 +184,20 @@ const YONETIM = {
   },
 };
 
+// ---------- yetki kontrolü yardımcıları ----------
+function yetkiVar(req) {
+  return istekYetkili(req);
+}
+
+function yetkisiz(res) {
+  // Token tanımlı değilse ayrı mesaj ver: kullanıcı nedenini bilsin.
+  const t = tokenYukle();
+  return json(res, 401, {
+    hata: t ? "yetkisiz: geçersiz veya eksik token"
+           : "yetkisiz: API token tanımlı değil (yazma uçları kapalı)",
+  });
+}
+
 // ---------- SSE canlı akış ----------
 function sse(res, olay, veri) {
   res.write("event: " + olay + "\n");
@@ -225,6 +280,7 @@ async function rota(req, res) {
   }
 
   if (mt === "POST" && y === "/door") {
+    if (!yetkiVar(req)) return yetkisiz(res);
     const b = await govde(req);
     const mesaj = kapiDogrula(b?.msg ?? "");
     if (!mesaj) {
@@ -235,6 +291,7 @@ async function rota(req, res) {
   }
 
   if (mt === "POST" && y === "/manage") {
+    if (!yetkiVar(req)) return yetkisiz(res);
     const b = await govde(req);
     const plan = YONETIM[b?.action ?? ""];
     if (!plan) {
@@ -248,6 +305,7 @@ async function rota(req, res) {
   }
 
   if (mt === "POST" && y === "/uzuv/etiket") {
+    if (!yetkiVar(req)) return yetkisiz(res);
     const b = await govde(req);
     const metin = (b?.metin || "").trim();
     if (!/^[A-Za-z0-9._\-*]+\s+\S+\s+\|sinif=(govde|guvenli|bilinmeyen|tehlikeli)$/
@@ -262,6 +320,7 @@ async function rota(req, res) {
   }
 
   if (mt === "POST" && y === "/ders") {
+    if (!yetkiVar(req)) return yetkisiz(res);
     const b = await govde(req);
     const hedef = (b?.hedef || "").trim();
     const dogrusu = (b?.dogrusu || "").trim();

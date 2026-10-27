@@ -91,6 +91,10 @@ class Brain:
         self.momentum = momentum
         self.epsilon_base = epsilon
         self.epsilon = epsilon
+        # Meta-öğrenme çarpanları (meta_ogrenme.py tarafından yazılır,
+        # update_dynamic_params ile temel lr/ε üzerine çarpılır)
+        self.meta_lr_carpan = 1.0
+        self.meta_eps_carpan = 1.0
         self.w = dict(self.INSTINCTS)  # (özellik, eylem) -> bağlantı gücü
         # son decide() keşifle mi yoksa kestirimle mi yapıldı?
         # (ders defteri: yalnızca kestirim hatası gerçek bilgi boşluğudur)
@@ -98,6 +102,12 @@ class Brain:
         # sıkılma (Aşama 4): main her tikte drives.sikilma'yı buraya taşır;
         # decide() keşif baskısını bundan alır
         self.sikilma = 0.0
+
+        # Credit/decorrelation system: stores bonus for (stim, action) pairs
+        self.credits = dict()  # (stim_tuple, action) -> accumulated bonus
+        self.credit_max = 1.0
+        self.credit_decay = 0.99  # fades each tick
+
         # Aşama 6 — keşif tabanı & tam havuz payı (canlı kör nokta çözümü):
         # eps marjla düşer ama asla EPS_TABAN'ın altına inmez (keşif hiç
         # tamamen kapanmaz). KESIF_TAM: keşfin bu oranı TAM havuzdan
@@ -124,11 +134,26 @@ class Brain:
         # USAGE_DONDURMA'yı aşan girdilerin fazlası buraya taşınır.
         # Amaç: kanıt (usage>=2) SONSUZA DEK korunurken tablo şişmez.
         self.usage_tasma = {}
+        # ---------- Yeni: Yapıslé plastisite (nöron büyüme/silme) ----------
+        # Sık kullanılan (stim, action) çiftlerine göre sanal nöron ekleme
+        self.neuron_id_counter = 0
+        # Her sanal nöron: {(stim, action): weight}
+        self.neurons = dict()  # neuron_id -> { (stim, action): weight }
+        # Büyüme eşiği: usage'si bu seviyeye ulaştığında nöron açılır
+        self.NEUROON_BUYUME_ESI = 50
+        # Açılan nöronları koruma (tavanlamaya maruz kalmaz)
+        self.korumali_neuronlar = set()
+        # Maksimum nöron sayısı: bellek koruması
+        self.MAX_NEUROON = 50
         # ---------- Yeni: Dinamik lr/epsilon ayarı ----------
         self.lr_min = 0.02
         self.lr_max = 0.25
         self.eps_min = 0.02
         self.eps_max = 0.60
+        # ---------- Sağlık sinyali eğitimi (AraBeyn entegrasyonu) ----------
+        # (durum_dict, puan, sinif_str) kayıtları; eşleşen durumdan
+        # ortalama puan ve en sık sınıf hesaplanarak sağlık üret.
+        self.saglik_egitim = []
 
     # ---------- Yeni: Dinamik hiperparametre ayarı ----------
     def update_dynamic_params(self, drives):
@@ -158,7 +183,8 @@ class Brain:
         # epsilon: acıda çok düşük (hayatta kalma > keşif), sıkıldığında yüksel
         eps_target = self.epsilon_base * (1.0 + 0.5 * sik) * (1.0 - 0.7 * pain)
         self.epsilon = max(self.eps_min, min(self.eps_max, eps_target))
-
+        self.lr = max(self.lr_min, min(self.lr_max, self.lr * getattr(self, "meta_lr_carpan", 1.0)))
+        self.epsilon = max(self.eps_min, min(self.eps_max, self.epsilon * getattr(self, "meta_eps_carpan", 1.0)))
     # ---------- Yeni: Episodik bellek ----------
     def episodic_push(self, stim, action, reward):
         """Son etkileşimi episodik belleğe ekle (kısa vadeli hatıra)."""
@@ -415,6 +441,56 @@ class Brain:
         return min(0.5, 0.05 * math.log1p(total))
 
     # ---------- Working memory (Aşama 3) ----------
+
+    @staticmethod
+    def _saglik_key(durum):
+        """Durumdan eşleşme keyi üret (komut + dogru; surpriz opsiyonel)."""
+        return (durum.get('komut'), durum.get('dogru'))
+
+    def ogren_saglik(self, durum, puan, sinif_str):
+        """Sağlık eğitimini kaydet: durum → (puan, sınıf_str).
+
+        Args:
+            durum: {'komut': str, 'dogru': bool, 'surpriz': int, ...} gibi
+                   bir durum sözlüğü.
+            puan:  sağlık puanı (ör. 140 = mükemmel, 15 = ölüm tehlikesi).
+            sinif_str: SINIFLAR'dan biri ("Mükemmel", "Ölüm Tehlikesi", ...).
+        """
+        self.saglik_egitim.append((dict(durum), float(puan), sinif_str))
+
+    def uretsaglik_sinyeli(self, durum):
+        """Sağlık sinyalini üret: eğitimli durumdan puan + sınıf,
+        eğitim yoksa nötr (75, Normal).
+
+        Args:
+            durum: dict ise komut/dogru/surpriz tabanlı eşleşme yapılır;
+                   drives nesnesi ise energy/hunger'dan nötr puan hesaplanır.
+
+        Returns:
+            (puan, sinif_idx): (float, int) — sağlık puanı ve sınıf indeksi.
+        """
+        if isinstance(durum, dict):
+            key = self._saglik_key(durum)
+            eslesen = [e for e in self.saglik_egitim
+                        if self._saglik_key(e[0]) == key]
+            if eslesen:
+                puan = sum(e[1] for e in eslesen) / len(eslesen)
+                sinif_str = max(
+                    set(e[2] for e in eslesen),
+                    key=lambda s: sum(1 for e in eslesen if e[2] == s),
+                )
+                idx = SINIFLAR.index(sinif_str)
+                return (round(puan, 2), idx)
+            # eğitim yok → nötr
+            return (75.0, SINIFLAR.index("Normal"))
+        # drives nesnesi: enerji/hunger'dan nötr puan
+        energy = getattr(durum, 'energy', 50.0)
+        hunger = getattr(durum, 'hunger', 5.0)
+        puan = round((energy * 0.7 + (10 - hunger) * 0.3), 2) \
+            if hasattr(durum, 'energy') else 75.0
+        sinif_idx = min(len(SINIFLAR) - 1, max(0, int((energy - 50) / 15)))
+        return (puan, sinif_idx)
+
     def working_remember(self, stim, action, strength=1.0):
         """Son (stim, action) denemesini çalışma belleğine yazar.
 
@@ -447,7 +523,7 @@ class Brain:
 
     def stimulus(self, drives, context, loc="", last_food="-", gorev=None,
                  sistem=None, son=None, deneme=None, ara=None,
-                 dunya=None, surpriz=None):
+                 dunya=None, surpriz=None, makine=None):
         eb, hb = drives.bins()
         # S4 ince girdi: 3'er kovalı L/M/H × A/O/T yanında onluk kovalar —
         # açlık/enerji ayrıntısı ham sayıya yaklaşır (klasör/lokasyon
@@ -912,6 +988,7 @@ class Brain:
                 # şişmeden korunması.
                 "usage_tasma": [[f, a, n] for (f, a), n
                                 in self.usage_tasma.items()],
+                "saglik_egitim": [[d, p, s] for (d, p, s) in self.saglik_egitim],
                 "kural": "delta1"}
         tmp.write_text(json.dumps(data, ensure_ascii=False),
                        encoding="utf-8")
@@ -968,6 +1045,14 @@ class Brain:
                 self.usage_tasma[(str(f), str(a))] = int(n)
             except (TypeError, ValueError):
                 continue          # bozuk kayıt atlanır
+        # --- sağlık eğitimi (kalıcı) ---
+        self.saglik_egitim = []
+        for kayit in data.get("saglik_egitim", []):
+            try:
+                d, p, s = kayit
+                self.saglik_egitim.append((dict(d), float(p), str(s)))
+            except (TypeError, ValueError):
+                continue          # bozuk kayıt atlanır
         # Eski (tavansız) kayıtlardan gelen şişik tablo sınırsız kalmasın.
         # Yeni yazılan beyinler zaten ≤ USAGE_TAVAN girdi içerdiğinden
         # save→load→load sabit nokta korunur (birebir round-trip bozulmaz).
@@ -979,3 +1064,197 @@ class Brain:
         self._usage_dondur()
         self._usage_tavanla()
         return len(links)
+SINIFLAR = ("Ölüm Tehlikesi", "Normal", "Mükemmel")
+
+class OzHedef:
+    """Özgür hedefleme organi - merak odaklı kendi hefleri belirler."""
+    def __init__(self, brain, drives):
+        self.brain = brain
+        self.drives = drives
+        self._hedef = None
+        self._baslangic_tik = 0
+        self._sureci_tik = 0
+        self._gecmis = []
+
+    # -----------------------------------------------------------
+    # Bağlam Sınıflandırması
+    # -----------------------------------------------------------
+    def _baglam_klas(self, drives):
+        """İç durumu 'tehlike' / 'acık' / 'rahatlama' olarak sınıflandır."""
+        try:
+            energy = float(getattr(drives, "energy", 50.0))
+            hunger = float(getattr(drives, "hunger", 30.0))
+        except (TypeError, ValueError):
+            energy, hunger = 50.0, 30.0
+
+        pain = 0.0
+        try:
+            _p = getattr(drives, "pain", 0.0)
+            if callable(_p): _p = _p()
+            pain = max(0.0, min(1.0, float(_p)))
+        except (TypeError, ValueError):
+            pass
+
+        in_danger = bool(getattr(drives, "in_danger", False))
+
+        if in_danger or pain > 0.5 or energy < 30.0 or hunger > 85.0:
+            return "tehlike"
+        if energy < 60.0 or hunger > 50.0:
+            return "acık"
+        return "rahatlama"
+
+    # -----------------------------------------------------------
+    # Her Tick Güncelleme
+    # -----------------------------------------------------------
+    def guncelle(self, tik):
+        """Her ana döngü tickinde çağrılır. Özgür hedefler belirlenir."""
+        # 1. Sürpriz/merak ölçümlerini topla
+        novel = float(getattr(self.drives, "novel", 0.0))
+        merak = float(getattr(self.drives, "merak", 0.0))
+
+        self._novel_gecmisi = getattr(self, "_novel_gecmisi", [])
+        self._merak_gecmisi = getattr(self, "_merak_gecmisi", [])
+        self._novel_gecmisi.append(novel)
+        self._merak_gecmisi.append(merak)
+
+        # 2. Bağlamı belirle
+        baglam = self._baglam_klas(self.drives)
+        self._aktif_baglam = baglam
+
+        # 3. Yeni hedef mı oluştur?
+        yeni_hedef = False
+
+        # Bağlama özel eşikler ve faktörler
+        if baglam == "tehlike":
+            novel_esik = 0.7   # tehlikede daha yüksek novelty gerekir
+            merak_esik = 0.5   # ve merak
+            koruma_faktori = 0.5  # mevcut hefi korumaya daha empefyok
+        elif baglam == "acık":
+            novel_esik = 0.5   # normal eşik
+            merak_esik = 0.3
+            koruma_faktori = 1.0
+        else:  # rahatlama
+            novel_esik = 0.4   # rahattalama'da daha düşük eşik
+            merak_esik = 0.2
+            koruma_faktori = 0.8  # hafifpekti teşvik
+
+        # A) Yüksek novelty + yüksek merak + Henüz hedef yoksa → HEFI BELİRLE
+        context_condition = (novel > novel_esik and merak > merak_esik and self._hedef is None)
+
+        if context_condition:
+            # Bağlama göre hedef türü belirle
+            if baglam == "tehlike":
+                # Tehlikede "keşif" yerine "sıfırla" veya korunmaya odaklan
+                if self._sureci_tik < 50:  # Henüz yeni başlarsa keşif
+                    self._hedef = "keşif"
+                else:
+                    self._hedef = "sıfırla"  # Uzun süredir varsa terk et
+                self._baslangic_tik = tik
+                self._sureci_tik = 0
+                self._gecmis.append({
+                    "tik": tik,
+                    "hedef": self._hedef,
+                    "novel": novel,
+                    "merak": merak,
+                    "baglam": baglam
+                })
+                yeni_hedef = True
+            elif baglam == "acık":
+                # Açlık: normal keşif
+                self._hedef = "keşif"
+                self._baslangic_tik = tik
+                self._sureci_tik = 0
+                self._gecmis.append({
+                    "tik": tik,
+                    "hedef": "keşif",
+                    "novel": novel,
+                    "merak": merak,
+                    "baglam": baglam
+                })
+                yeni_hedef = True
+            else:  # rahatlama
+                # Rahatlama: keşif veya öğren
+                self._hedef = "keşif"
+                self._baslangic_tik = tik
+                self._sureci_tik = 0
+                self._gecmis.append({
+                    "tik": tik,
+                    "hedef": "keşif",
+                    "novel": novel,
+                    "merak": merak,
+                    "baglam": baglam
+                })
+                yeni_hedef = True
+        # B) Uzun süredir aynı hedef var ve sikiliniyorSA → TERK ET (koruma faktörü ile)
+        elif (self._hedef and
+              tik - self._baslangic_tik > 200 and
+              float(getattr(getattr(self.drives, "sikilan", 0), "sikilan", 0) if hasattr(self.drives, "sikilan") else 0) > 0.5 * koruma_faktori):
+            self._gecmis.append({
+                "tik": tik,
+                "hedef": "sıfırla",
+                "novel": novel,
+                "merak": merak,
+                "reason": "sikilan_yüksek",
+                "koruma_faktori": koruma_faktori
+            })
+            self._hedef = None
+            self._sureci_tik = 0
+            yeni_hedef = True
+        # C) Mevcut hefin süresi doldu → Yeni hedef ara
+        elif (self._hedef and
+              self._sureci_tik >= getattr(self, "_HEDEFLER", {}).get(self._hedef, {}).get("max_sure", 100)):
+            self._gecmis.append({
+                "tik": tik,
+                "hedef": self._hedef,
+                "novel": novel,
+                "merak": merak,
+                "reason": "süre_doldu"
+            })
+            self._hedef = None
+            self._sureci_tik = 0
+            yeni_hedef = True
+
+        # 3. Alt süreyi güncelle (varsa)
+        if self._hedef:
+            self._sureci_tik += 1
+
+        return yeni_hedef
+
+    # -----------------------------------------------------------
+    # Mevcut Hedefi Döndür
+    # -----------------------------------------------------------
+    def mevcut_hedef(self):
+        """Şu an aktif olan hedef string'i (None jika yok)."""
+        return self._hedef
+
+    # -----------------------------------------------------------
+    # Hedef Talimatı (Main.py için çıktı)
+    # -----------------------------------------------------------
+    def hedef_talimat(self):
+        """
+        Dışarıya (main.py/yu) verilecek hedef talimatı.
+        ['keşif'], ['öğren'] ya da None döner.
+        """
+        if self._hedef:
+            return [self._hedef]
+        return None
+
+    # -----------------------------------------------------------
+    # Rapor/İzleme
+    # -----------------------------------------------------------
+    def rapor(self):
+        """Güncel hedef durumu raporu."""
+        novel_ort = sum(getattr(self, "_novel_gecmisi", [0])) / max(1, len(getattr(self, "_novel_gecmisi", [0])))
+        merak_ort = sum(getattr(self, "_merak_gecmisi", [0])) / max(1, len(getattr(self, "_merak_gecmisi", [0])))
+        return {
+            "aktif_hedef": self._hedef,
+            "sureci_tik": self._sureci_tik,
+            "novel_ortalama": round(novel_ort, 3),
+            "merak_ortalama": round(merak_ort, 3),
+            "gecmis_sayisi": len(self._gecmis)
+        }
+
+
+# -----------------------------------------------------------
+SINIFLAR = ("Ölüm Tehlikesi", "Normal", "Mükemmel")
+# -----------------------------------------------------------

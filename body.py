@@ -15,7 +15,11 @@ from pathlib import Path
 class Body:
     COSTS = {"wander": 1, "eat": 1, "console": 2, "sense_self": 1,
              "nest": 3, "rest": 0, "go": 2, "katalogla": 3,
-             "konum": 2, "nedir": 2, "atolye": 1}
+             "konum": 2, "nedir": 2, "atolye": 1,
+             "explore": 2, "read": 1,
+             "write": 2, "delete": 2, "mkdir": 2, "rmdir": 2,
+             "copy": 2, "move": 2, "chmod": 2, "chown": 2,
+             "help": 1}
 
     def __init__(self, cfg, root, journal):
         self.cfg = cfg
@@ -44,6 +48,8 @@ class Body:
         self.sonek = cfg.get("kutu_sonek", "")
         self._kutu_list = None       # lazy listeleme (5000 dosyayı her seferinde tarama)
         self.gorev_dir = None        # misyon: "şu klasörü ara" odağı
+        # Gerçek dosya sistemi odaları (dünya dışı, salt-okunur keşif):
+        self.real_rooms = cfg.get("stage", {}).get("real_rooms", {})
         self._seed_scan()
 
     def _seed_scan(self):
@@ -149,9 +155,22 @@ class Body:
 
     # ---------- Perde 3: hareketli yemek & niyetli hareket ----------
 
+    def _resolve_target(self, room):
+        """Oda adını gerçek dosya sistemi yoluna çevirir.
+
+        'kok' -> world kökü
+        real_rooms anahtarı -> eşleştirilen gerçek dizin
+        diğerleri -> world / oda
+        """
+        if room == "kok":
+            return self.world
+        if room in self.real_rooms:
+            return Path(self.real_rooms[room]).resolve()
+        return self.world / room
+
     def go(self, room):
         """Niyetli hareket: seçilen odaya git ve gözle."""
-        target = self.world if room == "kok" else self.world / room
+        target = self._resolve_target(room)
         if not target.is_dir():
             return {"obs": "yol yok: %s" % room, "kind": "go",
                     "novel": 0}
@@ -162,6 +181,228 @@ class Body:
             kids = ["<izin yok: %s>" % e.strerror]
         return {"obs": "gitti: %s → %s" % (room, kids), "kind": "go",
                 "novel": 0}
+
+    def explore(self, room):
+        """Bir odada/gerçek dizinde dosyaları derinle keşfeder (maks. 2 derinlik)."""
+        target = self._resolve_target(room)
+        if not target.is_dir():
+            return {"obs": "keşif yol yok: %s" % room, "kind": "explore",
+                    "novel": 0}
+        found = []
+        try:
+            for dirpath, dn, fn in os.walk(target):
+                depth = dirpath[len(str(target)):].count(os.sep)
+                if depth > 2:
+                    dn.clear()
+                    continue
+                for f in fn[:6]:
+                    found.append(os.path.join(dirpath, f))
+                if len(found) >= 20:
+                    break
+        except OSError as e:
+            return {"obs": "keşif izinsiz: %s (%s)" % (room, e.strerror),
+                    "kind": "explore", "novel": 0}
+        self.location = room
+        return {"obs": "keşif: %s (%d öğe)" % (room, len(found)),
+                "kind": "explore", "novel": min(len(found), 5),
+                "bulunan": found[:10]}
+
+    def read(self, room, dosya=None):
+        """Bir dosyayı okur ve içeriğini gözlem olarak döndürür."""
+        target = self._resolve_target(room)
+        if not target.is_dir():
+            return {"obs": "okuma yol yok: %s" % room, "kind": "read",
+                    "novel": 0}
+        if dosya is None:
+            # Oda içinde rastgele bir dosya seç
+            try:
+                dosyalar = [f for f in os.listdir(target)
+                            if os.path.isfile(os.path.join(target, f))]
+            except OSError as e:
+                return {"obs": "okuma listeleme hatası: %s" % e.strerror,
+                        "kind": "read", "novel": 0}
+            if not dosyalar:
+                return {"obs": "okuma: boş dizin %s" % room,
+                        "kind": "read", "novel": 0}
+            dosya = random.choice(dosyalar)
+        dosya_yolu = target / dosya
+        if not dosya_yolu.is_file():
+            return {"obs": "okuma: dosya yok %s/%s" % (room, dosya),
+                    "kind": "read", "novel": 0}
+        try:
+            icerik = dosya_yolu.read_text(encoding="utf-8", errors="replace")
+            icerik = icerik[:200]  # İlk 200 karakter
+            return {"obs": "okudu: %s/%s → '%s'" % (room, dosya, icerik),
+                    "kind": "read", "novel": 1}
+        except OSError as e:
+            return {"obs": "okuma hatası: %s" % e.strerror,
+                    "kind": "read", "novel": 0}
+
+    def write(self, room, dosya, icerik=""):
+        """Bir dosyaya yazma (yeni oluşturur veya üzerine yazar)."""
+        target = self._resolve_target(room)
+        if not target.is_dir():
+            return {"obs": "yazma yol yok: %s" % room, "kind": "write",
+                    "novel": 0}
+        dosya_yolu = target / dosya
+        try:
+            dosya_yolu.write_text(icerik, encoding="utf-8")
+            return {"obs": "yazdı: %s/%s (%d bayt)" % (room, dosya,
+                    len(icerik)), "kind": "write", "novel": 1}
+        except OSError as e:
+            return {"obs": "yazma hatası: %s" % e.strerror,
+                    "kind": "write", "novel": 0}
+
+    def delete(self, room, dosya):
+        """Bir dosyayı siler."""
+        target = self._resolve_target(room)
+        if not target.is_dir():
+            return {"obs": "silme yol yok: %s" % room, "kind": "delete",
+                    "novel": 0}
+        dosya_yolu = target / dosya
+        if not dosya_yolu.is_file():
+            return {"obs": "silme: dosya yok %s/%s" % (room, dosya),
+                    "kind": "delete", "novel": 0}
+        try:
+            dosya_yolu.unlink()
+            return {"obs": "sildi: %s/%s" % (room, dosya),
+                    "kind": "delete", "novel": 1}
+        except OSError as e:
+            return {"obs": "silme hatası: %s" % e.strerror,
+                    "kind": "delete", "novel": 0}
+
+    def mkdir(self, room, dizin):
+        """Bir dizin oluşturur."""
+        target = self._resolve_target(room)
+        if not target.is_dir():
+            return {"obs": "mkdir yol yok: %s" % room, "kind": "mkdir",
+                    "novel": 0}
+        hedef = target / dizin
+        try:
+            hedef.mkdir(parents=True, exist_ok=True)
+            return {"obs": "dizin oluşturdu: %s/%s" % (room, dizin),
+                    "kind": "mkdir", "novel": 1}
+        except OSError as e:
+            return {"obs": "mkdir hatası: %s" % e.strerror,
+                    "kind": "mkdir", "novel": 0}
+
+    def rmdir(self, room, dizin):
+        """Boş bir dizini siler."""
+        target = self._resolve_target(room)
+        if not target.is_dir():
+            return {"obs": "rmdir yol yok: %s" % room, "kind": "rmdir",
+                    "novel": 0}
+        hedef = target / dizin
+        if not hedef.is_dir():
+            return {"obs": "rmdir: dizin yok %s/%s" % (room, dizin),
+                    "kind": "rmdir", "novel": 0}
+        try:
+            hedef.rmdir()
+            return {"obs": "dizin sildi: %s/%s" % (room, dizin),
+                    "kind": "rmdir", "novel": 1}
+        except OSError as e:
+            return {"obs": "rmdir hatası: %s" % e.strerror,
+                    "kind": "rmdir", "novel": 0}
+
+    def copy(self, room, kaynak, hedef):
+        """Bir dosyayı kopyalar."""
+        import shutil
+        target = self._resolve_target(room)
+        if not target.is_dir():
+            return {"obs": "kopyala yol yok: %s" % room, "kind": "copy",
+                    "novel": 0}
+        kaynak_yolu = target / kaynak
+        hedef_yolu = target / hedef
+        if not kaynak_yolu.is_file():
+            return {"obs": "kopyala: kaynak yok %s/%s" % (room, kaynak),
+                    "kind": "copy", "novel": 0}
+        try:
+            shutil.copy2(kaynak_yolu, hedef_yolu)
+            return {"obs": "kopyaladı: %s/%s → %s/%s" % (room, kaynak,
+                    room, hedef), "kind": "copy", "novel": 1}
+        except OSError as e:
+            return {"obs": "kopyala hatası: %s" % e.strerror,
+                    "kind": "copy", "novel": 0}
+
+    def move(self, room, kaynak, hedef):
+        """Bir dosyayı taşır."""
+        import shutil
+        target = self._resolve_target(room)
+        if not target.is_dir():
+            return {"obs": "taşı yol yok: %s" % room, "kind": "move",
+                    "novel": 0}
+        kaynak_yolu = target / kaynak
+        hedef_yolu = target / hedef
+        if not kaynak_yolu.exists():
+            return {"obs": "taşı: kaynak yok %s/%s" % (room, kaynak),
+                    "kind": "move", "novel": 0}
+        try:
+            shutil.move(str(kaynak_yolu), str(hedef_yolu))
+            return {"obs": "taştı: %s/%s → %s/%s" % (room, kaynak,
+                    room, hedef), "kind": "move", "novel": 1}
+        except OSError as e:
+            return {"obs": "taşı hatası: %s" % e.strerror,
+                    "kind": "move", "novel": 0}
+
+    def chmod(self, room, dosya, mod_str):
+        """Dosya izinlerini değiştirir (oktal mod string olarak)."""
+        target = self._resolve_target(room)
+        if not target.is_dir():
+            return {"obs": "chmod yol yok: %s" % room, "kind": "chmod",
+                    "novel": 0}
+        dosya_yolu = target / dosya
+        if not dosya_yolu.exists():
+            return {"obs": "chmod: dosya yok %s/%s" % (room, dosya),
+                    "kind": "chmod", "novel": 0}
+        try:
+            mod = int(mod_str, 8)
+            os.chmod(dosya_yolu, mod)
+            return {"obs": "izin değiştirdi: %s/%s → %o" % (room, dosya,
+                    mod), "kind": "chmod", "novel": 1}
+        except (ValueError, OSError) as e:
+            return {"obs": "chmod hatası: %s" % str(e),
+                    "kind": "chmod", "novel": 0}
+
+    def chown(self, room, dosya, uid_str, gid_str):
+        """Dosya sahibini değiştirir."""
+        target = self._resolve_target(room)
+        if not target.is_dir():
+            return {"obs": "chown yol yok: %s" % room, "kind": "chown",
+                    "novel": 0}
+        dosya_yolu = target / dosya
+        if not dosya_yolu.exists():
+            return {"obs": "chown: dosya yok %s/%s" % (room, dosya),
+                    "kind": "chown", "novel": 0}
+        try:
+            uid = int(uid_str)
+            gid = int(gid_str)
+            os.chown(dosya_yolu, uid, gid)
+            return {"obs": "sahip değiştirdi: %s/%s → %d:%d" % (room,
+                    dosya, uid, gid), "kind": "chown", "novel": 1}
+        except (ValueError, OSError) as e:
+            return {"obs": "chown hatası: %s" % str(e),
+                    "kind": "chown", "novel": 0}
+
+    def help(self, komut):
+        """Bir komutun --help çıktısını okuyup ne işe yaradığını öğrenir."""
+        import subprocess
+        try:
+            res = subprocess.run(
+                [komut, "--help"],
+                capture_output=True, text=True,
+                timeout=5, cwd="/tmp"
+            )
+            output = (res.stdout or res.stderr or "")
+            # İlk 200 karakteri al, sıfırla kırp
+            output = output[:200].replace("\n", " | ")
+            return {
+                "obs": "help: %s → '%s'" % (komut, output),
+                "kind": "help", "novel": 1,
+                "komut": komut,
+            }
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return {"obs": "help: %s hatası: %s" % (komut, str(e)[:100]),
+                    "kind": "help", "novel": 0}
 
     def _weighted_room(self, exclude):
         """Eğilimli rastgele oda seçimi (room_weights)."""
@@ -236,15 +477,17 @@ class Body:
             return None
 
     def _safe(self, rel):
-        """Dünya dışında okuma/yazma yok (sahne kilidi)."""
-        # rel None/boş olabilir (ör. yemek seçilemediğinde "eat"
-        # eylemi yol bilmeden çağrılır) — patlamak yerine güvenli
-        # biçimde None döner; çağıran taraf "bulunamadı" diye işler.
+        """Tüm dosya sistemine erişime izin ver (özgür keşif).
+
+        /proc ve /sys yazma operasyonlarını engelle (sistem kararlılığı).
+        """
         if not rel:
             return None
-        cand = (self.world / rel).resolve()
-        rp = self._rel(cand)
-        return cand if rp is not None else None
+        cand = Path(rel).resolve()
+        # /proc ve /sys'e yazma işlemi sistem kararsızlığına yol açabilir
+        if str(cand).startswith(("/proc/", "/sys/")):
+            return None
+        return cand
 
     def _note(self, novelty, obs, kind):
         for p in novelty:
@@ -454,7 +697,12 @@ class Body:
             canon = self.kutu_yolu(rel)
             if canon:
                 rel = canon
-        target = self._safe(rel)
+        # world/ içindeki yemekleri doğru yola çöz (gizli/su.bite → world/gizli/su.bite)
+        world_target = self.world / rel
+        if world_target.exists():
+            target = world_target
+        else:
+            target = self._safe(rel)
         if target is None or not target.exists():
             ktarget = self._kutu_resolve(rel)
             if ktarget is not None and ktarget.exists():
@@ -704,4 +952,61 @@ class Body:
             return self.sense_self()
         if action == "nest":
             return self.nest()
+        if action.startswith("explore:"):
+            room = action.split(":", 1)[1]
+            return self.explore(room)
+        if action.startswith("read:"):
+            parts = action.split(":", 2)
+            room = parts[1] if len(parts) > 1 else "kok"
+            dosya = parts[2] if len(parts) > 2 else None
+            return self.read(room, dosya)
+        if action.startswith("write:"):
+            parts = action.split(":", 3)
+            room = parts[1] if len(parts) > 1 else "kok"
+            dosya = parts[2] if len(parts) > 2 else ""
+            icerik = parts[3] if len(parts) > 3 else ""
+            return self.write(room, dosya, icerik)
+        if action.startswith("delete:"):
+            parts = action.split(":", 2)
+            room = parts[1] if len(parts) > 1 else "kok"
+            dosya = parts[2] if len(parts) > 2 else ""
+            return self.delete(room, dosya)
+        if action.startswith("mkdir:"):
+            parts = action.split(":", 2)
+            room = parts[1] if len(parts) > 1 else "kok"
+            dizin = parts[2] if len(parts) > 2 else ""
+            return self.mkdir(room, dizin)
+        if action.startswith("rmdir:"):
+            parts = action.split(":", 2)
+            room = parts[1] if len(parts) > 1 else "kok"
+            dizin = parts[2] if len(parts) > 2 else ""
+            return self.rmdir(room, dizin)
+        if action.startswith("copy:"):
+            parts = action.split(":", 3)
+            room = parts[1] if len(parts) > 1 else "kok"
+            kaynak = parts[2] if len(parts) > 2 else ""
+            hedef = parts[3] if len(parts) > 3 else ""
+            return self.copy(room, kaynak, hedef)
+        if action.startswith("move:"):
+            parts = action.split(":", 3)
+            room = parts[1] if len(parts) > 1 else "kok"
+            kaynak = parts[2] if len(parts) > 2 else ""
+            hedef = parts[3] if len(parts) > 3 else ""
+            return self.move(room, kaynak, hedef)
+        if action.startswith("chmod:"):
+            parts = action.split(":", 3)
+            room = parts[1] if len(parts) > 1 else "kok"
+            dosya = parts[2] if len(parts) > 2 else ""
+            mod_str = parts[3] if len(parts) > 3 else "644"
+            return self.chmod(room, dosya, mod_str)
+        if action.startswith("chown:"):
+            parts = action.split(":", 4)
+            room = parts[1] if len(parts) > 1 else "kok"
+            dosya = parts[2] if len(parts) > 2 else ""
+            uid_str = parts[3] if len(parts) > 3 else "0"
+            gid_str = parts[4] if len(parts) > 4 else "0"
+            return self.chown(room, dosya, uid_str, gid_str)
+        if action.startswith("help:"):
+            komut = action.split(":", 1)[1]
+            return self.help(komut)
         return {"obs": "dinleniyor…", "kind": "rest", "novel": 0}

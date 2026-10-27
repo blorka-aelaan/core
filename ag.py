@@ -48,6 +48,11 @@ os.umask(0o022)  # sudo ile yazılan dosyalar sonradan okunabilir kalsın
 GOLDE = ("/tmp/", "/dev/shm/", "/var/tmp/")
 SISTEM = ("/usr/", "/bin/", "/sbin/", "/lib/", "/snap/", "/opt/")
 
+# Delta analizi: bir önceki çekimle farkı hesapla.
+# Organizma "sistem değişiyor" bağlamını buradan alır.
+_onceki_pidler = set()      # bir önceki çekimdeki PID kümesi
+_onceki_sid = None          # bir önceki çekim SID'si
+
 # dpkg önbelleği: exe yolu → paket adı (her çekimde tüm binary'ye
 # dpkg sormak değil, yalnızca yeni görünenlere)
 _paket_odb = {}
@@ -298,6 +303,32 @@ def cekim():
         _okunabilir_yap(JOURNAL)
     except OSError:
         pass
+    # ---- Delta analizi: önceki çekimle fark ----
+    # Yeni süreçler (bu çekimde var, öncekinde yok) ve kaybolan
+    # süreçler (öncekinde vardı, şimdi yok). Organizma "sistem
+    # değişiyor" bağlamını buradan öğrenir (sistem:DEGISIM jetonu).
+    global _onceki_pidler, _onceki_sid
+    mevcut_pidler = set(k["pid"] for k in kayitlar)
+    yeni_pid = mevcut_pidler - _onceki_pidler
+    kaybolan_pid = _onceki_pidler - mevcut_pidler
+    if _onceki_pidler and (yeni_pid or kaybolan_pid):
+        # En çok 10 yeni/kaybolan süreç adını logla
+        yeni_ad = [k.get("comm", "?") for k in kayitlar
+                   if k["pid"] in yeni_pid][:10]
+        try:
+            with open(JOURNAL, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "t": round(t, 1), "kind": "ag_delta", "sid": sid,
+                    "onceki_sid": _onceki_sid,
+                    "yeni": len(yeni_pid),
+                    "kaybolan": len(kaybolan_pid),
+                    "yeni_adlar": yeni_ad},
+                    ensure_ascii=False) + "\n")
+            _okunabilir_yap(JOURNAL)
+        except OSError:
+            pass
+    _onceki_pidler = mevcut_pidler
+    _onceki_sid = sid
     # ---- FAZ 2: bilinmeyenleri modelle sınıfla (gözlem; karar yok) ----
     try:
         sayim, riskli = sinifla(kayitlar)

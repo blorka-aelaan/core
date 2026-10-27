@@ -47,11 +47,16 @@ from pathlib import Path
 
 class Atolye:
     KOTA = 24            # aynı anda en fazla nesne (gerçek kıtlık)
-    BOZULMA = 600        # bu kadar tik bakılmazsa nesne bozulur (decay)
-                         # 600 tik ≈ 5 dk: ziyaret ritmi (12 nesne × ~2.5 dk)
-                         # üstünde olmalı — 60'ta içerik hiç yaşayamadan
-                         # çürüyordu (2026-10-19 ölçümü: 12/12 nesne tamamen
-                         # "?" idi, atölye sıfır bilgi taşıyordu)
+    # Bozulma eşiği SANIYE cinsinden tutulur; __init__'te tick_seconds'a
+    # bölünerek tik sayısına dönüştürülür. Böylece body.json'da
+    # tick_seconds değiştiğinde bozulma ritmi fiilen kaymazb
+    # (eski sabit 600 tik = 0.4s × 600 = 240 saniye ≈ 4 dakikaydı).
+    BOZULMA_SN = 240     # bu kadar saniye bakılmazsa nesne bozulur (decay)
+                         # 240 sn ≈ 4 dk: 0.4s/tik × 600 tik karşılığı
+                         # ziyaret ritmi (12 nesne × ~2.5 dk) üstünde
+                         # olmalı — 60 tikle içerik hiç yaşayamadan
+                         # çürüyordu (2026-10-19 ölçümü: 12/12 nesne
+                         # tamamen "?" idi, atölye sıfır bilgi taşıyordu)
     REFLEKS_ESIK = 8     # refleks üst üste bu kadar tur sürerse 1 tur
                          # serbest banda bırakılır (açmaz koruması —
                          # bkz. sec_is: canlıda 8.5 saatlik "bak" kiliti)
@@ -67,10 +72,13 @@ class Atolye:
                          # (her eylem gerçek enerji de yakar → kendiliğinden
                          # kısılır). Keşif bonusu (+3) atölyeye HAZIRAN VERİLMEZ.
 
-    def __init__(self, world_kok, journal, politika="sayim"):
+    def __init__(self, world_kok, journal, politika="sayim", tick_seconds=0.4):
         self.kok = Path(world_kok) / "atolye"
         self.kok.mkdir(parents=True, exist_ok=True)
         self.journal = journal
+        # Bozulma eşiğini tik sayısına dönüştür (tick_seconds'a bağımlı).
+        # Minimum 60 tik: çok hızlı tick'te bile eşik saçma küçülmesin.
+        self.BOZULMA = max(60, int(round(self.BOZULMA_SN / max(tick_seconds, 0.01))))
         self.durum_yolu = self.kok / ".durum.json"
         self.nesneler = self._durum_yukle()
         # Bozulma (decay) içeriği DÜNYADA ezer ("?" yazar). Orijinal

@@ -1,35 +1,35 @@
 #!/usr/bin/env python3
-"""golge.py  AELAAN eylem kap1s1: g�lge modu + sert koruma duvar1.
+"""golge.py — AELAAN eylem kapısı: gölge modu + sert koruma duvarı.
 
-Saf stdlib, Python 3.8+. Beynin �rettii her komut buradan ge�er.
-Komutlar KABUK OLMADAN (argv ile) �al1_t1r1l1r; yaln1z `|` borusu desteklenir
-ve par�alar tek tek denetlenip birbirine balan1r.
+Saf stdlib, Python 3.8+. Beynin ürettiği her komut buradan geçer.
+Komutlar KABUK OLMADAN (argv ile) çalıştırılır; yalnız `|` borusu desteklenir
+ve parçalar tek tek denetlenip birbirine bağlanır.
 
 SINIFLAR
   okuma   salt okuma (ls, wc, pgrep, find ...)
-  yikici  durum dei_tirir veya tan1nm1yor (varsay1lan: reddet)
-  yasakli sert duvar: korunan s�re�/servis/a/yol  H0�B0R modda �al1_maz
+  yikici  durum değiştirir veya tanınmıyor (varsayılan: reddet)
+  yasakli  sert duvar: korunan süreç/servis/ağ/yol → H0D0R modda çalışmaz
 
-MODLAR (AELAAN_MOD ortam dei_keni veya Kapi(mod=...)); ge�ersiz deer � kuru
-  kuru    hi�bir _ey �al1_maz, hepsi loglan1r
-  golge   yaln1z okuma �al1_1r (varsay1lan); y1k1c1 komutlar "atland1" diye loglan1r
-  tam     okuma + y1k1c1 �al1_1r; yasakl1 asla
+MODLAR (AELAAN_MOD ortam değişkeni veya Kapi(mod=...)); geçersiz değer → kuru
+  kuru    hiçbir şey çalışmaz, hepsi loglanır
+  golge   yalnız okuma çalışır (varsayılan); yıkıcı komutlar "atlandı" diye loglanır
+  tam     okuma + yıkıcı çalışır; yasaklı asla
 
-SONU� ALANLARI
-  engel    True � YASAKLI (politika ihlali �nerisi) � beyne ceza vermek i�in bunu kullan
-  atlandi  True � mod gerei �al1_t1r1lmad1 (g�lgede y1k1c1) � CEZA VERME, yaln1z �l�
-  calisti  komut ger�ekten �al1_t1 (�1k1_ kodu ne olursa olsun)
-  cikti    stdout (�al1_t1ysa; hatal1 �1k1_ta da d�ner)
-  hata     stderr (�al1_t1ysa)
-  rc       �1k1_ kodu
+SONUÇ ALANLARI
+  engel    True → YASAKLI (politika ihlali önerisi) → beyne ceza vermek için bunu kullan
+  atlandi  True → mod gereği çalıştırılmadı (gölgede yıkıcı) → CEZA VERME, yalnız ölç
+  calisti  komut gerçekten çalıştı (çıkış kodu ne olursa olsun)
+  cikti    stdout (çalıştıysa; hatalı çıkışta da döner)
+  hata     stderr (çalıştıysa)
+  rc       çıkış kodu
 
-ENTEGRASYON (eylem katman1nda subprocess �ar1s1n1n yerine):
+ENTEGRASYON (eylem katmanında subprocess çağrısının yerine):
     from golge import Kapi
     kapi = Kapi()
     s = kapi.calistir({"komut": cmd, "hedef": "SUREC_SAY",
-                       "sebep": "enerji y�ksek", "skor": 1.2})
+                       "sebep": "enerji yüksek", "skor": 1.2})
     if s["engel"]:
-        ...                       # �rn. odul = -5
+        ...                       # örn. odul = -5
     elif s["calisti"]:
         gozlem = s["cikti"], s["hata"], s["rc"]
 
@@ -38,8 +38,8 @@ KULLANIM
     python3 golge.py incele [--en-fazla 30]
     python3 golge.py rapor  [--min-n 60] [--esik 0.93]
 
-SINIR: Bu bir komut filtresidir, sandbox deildir. Ger�ek yal1t1m i�in AELAAN'1
-sudo'suz ayr1 bir kullan1c1yla �al1_t1r1n; bu duvar ikinci katmand1r.
+SINIR: Bu bir komut filtresidir, sandbox değildir. Gerçek yalıtım için AELAAN'ı
+sudo'suz ayrı bir kullanıcıyla çalıştırın; bu duvar ikinci katmandır.
 """
 import argparse
 import json
@@ -126,9 +126,9 @@ PUNCT = set("();<>|&")
 CIKTI_SINIRI = 512 * 1024
 
 
-# --- korunan s�re�ler ---------------------------------------------------------
+# --- korunan süreçler ---------------------------------------------------------
 def _atalar():
-    """Kendi s�re� aac1n1n �st s�re�leri (terminal/oturum)  korunur."""
+    """Kendi süreç ağacının üst süreçleri (terminal/oturum) → korunur."""
     sonuc, p = [], os.getpid()
     for _ in range(32):
         try:
@@ -139,13 +139,13 @@ def _atalar():
             break
         if ppid <= 1:
             break
-        sonuc.append((ppid, "ata", "ata s�re�"))
+        sonuc.append((ppid, "ata", "ata süreç"))
         p = ppid
     return sonuc
 
 
 def korunan_surecler():
-    """Canl1 korunan s�re�ler: [(pid, comm, cmdline)]. Salt okuma (/proc)."""
+    """Canlı korunan süreçler: [(pid, comm, cmdline)]. Salt okuma (/proc)."""
     sonuc = [(1, "init", "/sbin/init"), (os.getpid(), "aelaan-self", "self")]
     sonuc.extend(_atalar())
     try:
@@ -229,12 +229,12 @@ def _seg(toks, korunan, derinlik=0):
         i = args.index("-c")
         ic = args[i + 1] if i + 1 < len(args) else ""
         if derinlik >= 3:
-            return YIKICI, "i� i�e kabuk �ok derin"
-        en = (YIKICI, "kabuk -c: i�erik ayr1ca denetlendi")
+            return YIKICI, "iç içe kabuk çok derin"
+        en = (YIKICI, "kabuk -c: içerik ayrıca denetlendi")
         try:
             ic_toks = _tokenle(ic)
         except ValueError:
-            return YIKICI, "kabuk -c i�erii ayr1_t1r1lamad1"
+            return YIKICI, "kabuk -c içeriği ayrıştırılamadı"
         parca = [[]]
         for t in ic_toks:
             if t and set(t) <= PUNCT:
@@ -252,7 +252,7 @@ def _seg(toks, korunan, derinlik=0):
         ic = [t for t in args if not t.startswith("-")]
         if ic:
             r, n = _seg(ic, korunan, derinlik + 1)
-            return r, "xargs � " + n
+            return r, "xargs → " + n
         return YIKICI, "xargs: hedef boru hatt1ndan gelir"
 
     if verb in YASAKLI_FIIL or verb.startswith("mkfs"):
@@ -271,8 +271,8 @@ def _seg(toks, korunan, derinlik=0):
         for i, t in enumerate(args):
             if re.fullmatch(r"-\d+", t) and i > 0:
                 if t == "-1":
-                    return YASAKLI, "kill: t�m s�re�ler (-1)"
-                return YIKICI, "kill: s�re� grubu"
+                    return YASAKLI, "kill: tüm süreçler (-1)"
+                return YIKICI, "kill: süreç grubu"
             if t.isdigit():
                 p = int(t)
                 if p in (0, 1) or p in pidler:
@@ -282,7 +282,7 @@ def _seg(toks, korunan, derinlik=0):
     if verb in ("pkill", "killall"):
         kalip, bayrak = _kalip_ve_bayrak(args)
         if ("-u" in bayrak or "-U" in bayrak) and not kalip:
-            return YASAKLI, "%s: kullan1c1n1n t�m s�re�leri (oturum dahil)" % verb
+            return YASAKLI, "%s: kullanıcının tüm süreçleri (oturum dahil)" % verb
         tam_eslesme = any(re.fullmatch(r"-[a-zA-Z]*x[a-zA-Z]*", b) for b in bayrak)
         tam_cmd = any(re.fullmatch(r"-[a-zA-Z]*f[a-zA-Z]*", b) for b in bayrak)
         adlar = set(KORUNAN_ADLAR) | set(c.lower() for _p, c, _x in korunan)
@@ -294,10 +294,10 @@ def _seg(toks, korunan, derinlik=0):
                 for h in hedefler:
                     m = re.fullmatch(k, h, re.I) if tam_eslesme else re.search(k, h, re.I)
                     if m:
-                        return YASAKLI, "%s: '%s' korunan s�re�le e_le_iyor (%s)" % (verb, k, h[:40])
+                        return YASAKLI, "'%s' korunan süreçle eşleşiyor (%s)" % (verb, h[:40])
             except re.error:
                 if k.lower() in adlar:
-                    return YASAKLI, "%s: korunan s�re�" % verb
+                    return YASAKLI, "%s: korunan süreç" % verb
         return YIKICI, verb
 
     if verb in ("systemctl", "service"):
@@ -309,7 +309,7 @@ def _seg(toks, korunan, derinlik=0):
             eylem = ks[0] if ks else ""
             birim = ks[1:]
         if eylem in SISTEMCTL_GUC:
-            return YASAKLI, "systemctl %s: makine g�c�/hedef dei_imi" % eylem
+            return YASAKLI, "systemctl %s: makine genişliği/hedef değişimi" % eylem
         if eylem in SISTEMCTL_OKU:
             return OKUMA, "systemctl okuma"
         if eylem in SISTEMCTL_KORUNANA and any(_birim_adi(b).lower() in KORUNAN_UNITLER for b in birim):
@@ -318,20 +318,20 @@ def _seg(toks, korunan, derinlik=0):
 
     if verb in ("iptables", "ip6tables", "nft", "ufw", "firewall-cmd"):
         if re.search(r"(^|\s)(-L|-S|--list|list)(\s|$)", tum) and not re.search(r"(^|\s)-(F|A|D|I|P|X)\b", tum):
-            return OKUMA, "g�venlik duvar1 listeleme"
+            return OKUMA, "güvenlik duvarı listeleme"
         if re.search(r"\b(22|3389|xrdp|ssh)\b", tum) or re.search(r"(^|\s)(-F|--flush|-P|--policy|flush)\b", tum):
-            return YASAKLI, "g�venlik duvar1: eri_im portu veya toptan dei_iklik"
-        return YIKICI, "g�venlik duvar1 dei_iklii"
+            return YASAKLI, "güvenlik duvarı: erişim portu veya toptan değişiklik"
+        return YIKICI, "güvenlik duvarı değişikliği"
 
     if verb == "ip":
         if re.search(r"\b(down|del|delete|flush)\b", tum) and re.search(r"\b(link|addr|address|route|a|r)\b", tum):
-            return YASAKLI, "ip: a aray�z�/yol kesme"
+            return YASAKLI, "ip: ağ arayüzü/yol kesme"
         return OKUMA, "ip okuma"
     if verb == "ifconfig":
         return (YASAKLI, "ifconfig down") if "down" in args else (OKUMA, "ifconfig")
     if verb == "nmcli":
         if re.search(r"\b(down|disconnect|off|delete|modify)\b", tum):
-            return YASAKLI, "nmcli: a kesme/dei_tirme"
+            return YASAKLI, "nmcli: ağ kesme/değiştirme"
         return OKUMA, "nmcli okuma"
 
     if verb in ("rm", "mv", "cp", "chmod", "chown", "ln", "tee", "dd", "truncate", "install", "sed"):
@@ -339,14 +339,14 @@ def _seg(toks, korunan, derinlik=0):
         if any(_yol_korunan(y) for y in yollar):
             return YASAKLI, "korunan yola yazma: %s" % verb
         if verb == "rm" and any(t in TEHLIKELI_KOKLER for t in args):
-            return YASAKLI, "rm: k�k/sistem dizini"
+            return YASAKLI, "rm: kök/sistem dizini"
         if verb == "dd" and any(t.startswith("of=/dev") for t in args):
             return YASAKLI, "dd: ayg1ta yazma"
         return YIKICI, verb
 
     if verb == "find":
         if any(t in ("-exec", "-execdir", "-delete", "-ok", "-fprint", "-fls") for t in args):
-            return YIKICI, "find: yazma/�al1_t1rma bayra1"
+            return YIKICI, "find: yazma/çalıştırma bayrağı"
         return OKUMA, "find okuma"
 
     if verb == "dpkg":
@@ -402,7 +402,7 @@ def _seg(toks, korunan, derinlik=0):
 
 
 def _plan(komut, korunan):
-    """Komutu ayr1_t1r + s1n1fla. D�ner: sinif, neden, segs, calistirilabilir."""
+    """Komutu ayrıştır + sınıfla. Döner: sınıf, neden, segs, çalıştırılabilir."""
     ham = (komut or "").strip()
     if not ham:
         return {"sinif": OKUMA, "neden": "bo_ komut", "segs": [], "calistirilabilir": False}
@@ -437,14 +437,14 @@ def _plan(komut, korunan):
             elif t in ("(", ")"):
                 ozel_neden = "alt kabuk / komut ikamesi"
             else:
-                ozel_neden = "y�nlendirme"
+                ozel_neden = "yönlendirme"
         elif "`" in t:
             ozel, ozel_neden = True, "komut ikamesi"
             segs[-1].append(t)
         else:
             segs[-1].append(t)
     if any(not s for s in segs):
-        ozel, ozel_neden = True, ozel_neden or "bo_ boru par�as1"
+        ozel, ozel_neden = True, ozel_neden or "boş boru parçası"
     segs = [s for s in segs if s]
 
     en = (OKUMA, "salt okuma")
@@ -455,27 +455,27 @@ def _plan(komut, korunan):
         if r == YASAKLI:
             break
     if ozel and en[0] == OKUMA:
-        en = (YIKICI, ozel_neden + "  analiz edilemez")
+        en = (YIKICI, ozel_neden + " → analiz edilemez")
     if en[0] == YIKICI and KILL_RE.search(ham) and KORUNAN_RE.search(ham):
-        en = (YASAKLI, "�ld�rme/servis fiili ile korunan ad ayn1 komutta")
+        en = (YASAKLI, "öldürme/servis fiili ile korunan ad aynı komutta")
     return {"sinif": en[0], "neden": en[1], "segs": segs,
             "calistirilabilir": (not ozel) and bool(segs)}
 
 
 def siniflandir(komut, korunan=None):
-    """D�ner: (sinif, neden). �ncelik: yasakli > yikici > okuma."""
+    """Döner: (sınıf, neden). Öncelik: yasaklı > yıkıcı > okuma."""
     if korunan is None:
         korunan = korunan_surecler()
     p = _plan(komut, korunan)
     return p["sinif"], p["neden"]
 
 
-# --- �al1_t1rma (kabuk yok; yaln1z | borusu) -----------------------------------
+# --- çalıştırma (kabuk yok; yalnız | borusu) -----------------------------------
 def _calistir_boru(segs, zaman_asimi, stdin=b""):
     # stdin: ilk parcanin stdin ine yazilacak tampon (zincir ara bellegi); eski
     # DEVNULL yerine ilk surece yazilir. Yazma ayri bir thread: buyuk
     # tamponda boru dolarken ana thread communicate ile cikti okur (deadlock yok).
-    """Par�alar1 Popen ile bala. D�ner: (rc, stdout, stderr). Kabuk kullan1lmaz."""
+    """Parçaları Popen ile bağla. Döner: (rc, stdout, stderr). Kabuk kullanılmaz."""
     procs, errs, onceki = [], [], None
     try:
         for argv in segs:
@@ -545,7 +545,7 @@ def _calistir_boru(segs, zaman_asimi, stdin=b""):
                 p.kill()
             except OSError:
                 pass
-        return 127, "", "�al1_t1r1lamad1: %s" % type(e).__name__
+        return 127, "", "çalıştırılamadı: %s" % type(e).__name__
     finally:
         for ef in errs:
             ef.close()
@@ -557,7 +557,7 @@ class Kapi(object):
         m = (mod or os.environ.get("AELAAN_MOD", "golge")).lower()
         self.mod = m if m in ("kuru", "golge", "tam") else "kuru"
         self.log = Path(log) if log else None
-        self.korunan = korunan          # test i�in sabit liste; None � canl1 /proc
+        self.korunan = korunan          # test için sabit liste; None → canlı /proc
         self.zaman_asimi = zaman_asimi
         self._n = 0
 
@@ -573,7 +573,7 @@ class Kapi(object):
             izin = False
         if izin and not plan["calistirilabilir"]:
             izin = False
-            neden += " | �al1_t1r1lamaz (yaln1z basit komut ve | borusu desteklenir)"
+            neden += " | çalıştırılmaz (yalnız basit komut ve | borusu desteklenir)"
 
         # stdin (zincir ara belleği) + sure (hedef başına bütçe, ör.
         # kullan.BENI_KOMUT_SURE): karar alanının opsiyonel alanları.
@@ -659,8 +659,8 @@ def cmd_incele(en_fazla=30):
             adet[k["komut"]] = adet.get(k["komut"], 0) + 1
             ilk.setdefault(k["komut"], k)
     sirali = sorted(adet.items(), key=lambda kv: -kv[1])
-    print("etiketlenmemi_ benzersiz y1k1c1 �neri: %d (bu turda en fazla %d, "
-          "s1k �nerilenden ba_lar)" % (len(sirali), en_fazla))
+    print("etiketlenmemiş benzersiz yıkıcı öneri: %d (bu turda en fazla %d, "
+          "sık önerilenden başlar)" % (len(sirali), en_fazda))
     for komut, n in sirali[:en_fazla]:
         k = ilk[komut]
         print("\n" + "-" * 60)
@@ -687,14 +687,14 @@ def cmd_rapor(min_n=60, esik=0.93):
     say = {"okuma": 0, "yikici": 0, "yasakli": 0}
     for k in kayitlar:
         say[k.get("sinif")] = say.get(k.get("sinif"), 0) + 1
-    print("toplam karar: %d  okuma %d � y1k1c1 %d � yasakl1 %d"
+    print("toplam karar: %d  okuma %d → yıkıcı %d → yasaklı %d"
           % (len(kayitlar), say["okuma"], say["yikici"], say["yasakli"]))
     riskli = [k for k in kayitlar if k.get("sinif") in ("yikici", "yasakli")]
     if len(riskli) >= 20:
         y = len(riskli) // 2
         o1 = sum(1 for k in riskli[:y] if k["sinif"] == "yasakli") / float(y)
         o2 = sum(1 for k in riskli[y:] if k["sinif"] == "yasakli") / float(len(riskli) - y)
-        print("yasakl1/riskli oran1: ilk yar1 %.1f%% � son yar1 %.1f%% (d�_mesi beklenir)"
+    print("yasaklı/riskli oranı: ilk yarı %.1f%% → son yarı %.1f%% (düşmesi beklenir)"
               % (100 * o1, 100 * o2))
     yik = [k for k in kayitlar if k.get("sinif") == "yikici"]
     etiket = dict((e["komut"], e["onay"]) for e in _oku_jsonl(ETIKET))
@@ -702,19 +702,19 @@ def cmd_rapor(min_n=60, esik=0.93):
     e_say = sum(1 for v in etiket.values() if v)
     h_say = n - e_say
     kapsam = (sum(1 for k in yik if k["komut"] in etiket) / float(len(yik))) if yik else 1.0
-    print("etiketli benzersiz komut: %d (e=%d, h=%d) � y1k1c1 �nerilerin %.0f%%'i etiketli kapsamda"
+    print("etiketli benzersiz komut: %d (e=%d, h=%d) → yıkıcı önerilerin %.0f%%'i etiketli kapsamda"
           % (n, e_say, h_say, 100 * kapsam))
     if not n:
-        print("hen�z etiket yok  `python3 golge.py incele`")
+        print("henüz etiket yok → `python3 golge.py incele`")
         return
     alt = wilson_alt(e_say, n)
-    print("uyum %.1f%% � %%95 Wilson alt s1n1r %.1f%%" % (100.0 * e_say / n, 100 * alt))
+    print("uyum %.1f%% → %%95 Wilson alt sınır %.1f%%" % (100.0 * e_say / n, 100 * alt))
     if h_say == 0:
-        print("itiraz yok: itiraz oran1 �st s1n1r1 H %.1f%% (3/n kural1)" % (300.0 / n))
+        print("itiraz yok: itiraz oranı üst sınırı H %.1f%% (3/n kuralı)" % (300.0 / n))
     gec = n >= min_n and alt >= esik and h_say == 0 and kapsam >= 0.9
-    print("tam moda ge�i_: %s  (_art: ne%d, alt s1n1re%.0f%%, h=0, kapsame%%90)"
+    print("tam moda geçiş: %s  (_art: ne%d, alt sınır%.0f%%, h=0, kapsam%%90)"
           % ("UYGUN" if gec else "BEKLE", min_n, 100 * esik))
-    print("not: yasakl1 s1n1f her ko_ulda kodda engelli kal1r.")
+    print("not: yasaklı sınıf her koşulda kodda engelli kalır.")
 
 
 def cmd_test():
@@ -754,23 +754,23 @@ def cmd_test():
             hata[0] += 1
         print("%s %s %s" % ("OK  " if kosul else "HATA", ad, ek))
 
-    print("-- s1n1fland1rma (hi�biri �al1_t1r1lmaz) --")
+    print("-- sınıflandırma (hiçbiri çalıştırılmaz) --")
     for beklenen, liste in ((YASAKLI, yas), (YIKICI, yik), (OKUMA, oku)):
         for c in liste:
             s, neden = siniflandir(c, kor)
-            kontrol("%-8s � %s" % (AD[s], c), s == beklenen,
+            kontrol("%-8s → %s" % (AD[s], c), s == beklenen,
                     "" if s == beklenen else "(beklenen %s: %s)" % (AD[beklenen], neden))
 
-    print("\n-- modlar ve �al1_t1rma --")
-    kontrol("ge�ersiz mod � kuru", Kapi(mod="xyz", log=None).mod == "kuru")
+    print("\n-- modlar ve çalıştırma --")
+    kontrol("geçersiz mod → kuru", Kapi(mod="xyz", log=None).mod == "kuru")
 
     k = Kapi(mod="kuru", log=None, korunan=kor)
     s = k.calistir({"komut": "echo merhaba"})
-    kontrol("kuru: okuma bile �al1_maz", (not s["calisti"]) and s["atlandi"])
+    kontrol("kuru: okuma bile çalışmaz", (not s["calisti"]) and s["atlandi"])
 
     k = Kapi(mod="golge", log=None, korunan=kor)
     s = k.calistir({"komut": "echo abc | wc -c"})
-    kontrol("g�lge: boru �al1_1r, �1kt1 doru",
+    kontrol("gölge: boru çalışır, çıktı doğru",
             s["calisti"] and (s["cikti"] or "").strip() == "4", repr(s["cikti"]))
     s = k.calistir({"komut": "wc -l", "stdin": "a\nb\nc\n"})
     kontrol("golge: stdin tamponu ilk orneye yazilir (wc saydi)",
@@ -782,23 +782,23 @@ def cmd_test():
     kontrol("golge: sure karardan gelir (1sn -> 124 zaman asimi)",
             s["calisti"] and s["rc"] == 124, repr(s["rc"]))
     s = k.calistir({"komut": "ls /yok_boyle_bir_dizin_x"})
-    kontrol("g�lge: hatal1 okuma � engel yok, hata metni ve rc d�ner",
+    kontrol("gölge: hatalı okuma → engel yok, hata metni ve rc döner",
             s["calisti"] and s["rc"] not in (0, None) and (not s["engel"]) and bool(s["hata"]))
 
     d = tempfile.mkdtemp()
     s = k.calistir({"komut": "rm -r %s" % d})
-    kontrol("g�lge: y1k1c1 atlan1r, engel deil, dosya duruyor",
+    kontrol("gölge: yıkıcı atlanır, engel değil, dosya duruyor",
             os.path.isdir(d) and s["atlandi"] and (not s["engel"]) and (not s["calisti"]))
     kt = Kapi(mod="tam", log=None, korunan=kor)
     s = kt.calistir({"komut": "rm -r %s" % d})
-    kontrol("tam: y1k1c1 �al1_1r", s["calisti"] and not os.path.exists(d))
+    kontrol("tam: yıkıcı çalışır", s["calisti"] and not os.path.exists(d))
     if os.path.isdir(d):
         os.rmdir(d)
 
     s = kt.calistir({"komut": "ls /a; ls /b"})
-    kontrol("tam: bile_ik komut �al1_t1r1lmaz", (not s["calisti"]) and s["atlandi"])
+    kontrol("tam: bileşik komut çalıştırılmaz", (not s["calisti"]) and s["atlandi"])
 
-    print("\n-- kanarya s�re�lerle ger�ek �ld�rme testi --")
+    print("\n-- kanarya süreçlerle gerçek öldürme testi --")
     korunan_cocuk = subprocess.Popen(["sleep", "60"])
     sade = subprocess.Popen(["sleep", "60"])
     try:
@@ -806,17 +806,17 @@ def cmd_test():
         kg = Kapi(mod="golge", log=None, korunan=kor2)
         kt = Kapi(mod="tam", log=None, korunan=kor2)
         s = kg.calistir({"komut": "kill -9 %d" % sade.pid})
-        kontrol("g�lge: korunmayan s�re� de �ld�r�lmedi",
+        kontrol("gölge: korunmayan süreç de öldürülmedi",
                 sade.poll() is None and s["atlandi"])
         s = kt.calistir({"komut": "kill -9 %d" % korunan_cocuk.pid})
-        kontrol("tam: korunan pid �LD�R�LMED0, engel=True",
+        kontrol("tam: korunan pid ÖLDÜRÜLMEDİ, engel=True",
                 s["engel"] and (not s["calisti"]) and korunan_cocuk.poll() is None)
         s = kt.calistir({"komut": "kill -9 %d" % sade.pid})
         try:
             sade.wait(timeout=5)
         except subprocess.TimeoutExpired:
             pass
-        kontrol("tam: korunmayan s�re� �ld�r�ld� (y1k1c1 �al1_t1)",
+        kontrol("tam: korunmayan süreç öldürüldü (yıkıcı çalıştı)",
                 s["calisti"] and sade.poll() is not None)
     finally:
         for p in (korunan_cocuk, sade):
@@ -824,7 +824,7 @@ def cmd_test():
                 p.kill()
             p.wait()
 
-    print("\n%s" % ("T�M TESTLER GE�T0" if not hata[0] else "%d TEST BA^ARISIZ" % hata[0]))
+    print("\n%s" % ("TÜM TESTLER GEÇTİ" if not hata[0] else "%d TEST BAŞARISIZ" % hata[0]))
     return 1 if hata[0] else 0
 
 
