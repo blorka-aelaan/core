@@ -35,6 +35,7 @@ import ust_beyn as ust_beyn_mod
 import oz_hedef as oz_hedef_mod
 import dusunme as dusunme_mod
 import training as training_mod
+import uzuv as uzuv_mod
 
 ROOT = Path(__file__).resolve().parent
 
@@ -119,7 +120,9 @@ def main():
     drives = drives_mod.Drives(cfg)
     mind = brain_mod.Brain(seed=args.seed)
     # Meta-öğrenme: lr/epsilon'ı dinamik ayarlar
-    meta = meta_ogrenme_mod.MetaOgrenme(mind, pencere=100)
+    # Uzuv LIM: CPU/RAM/disk baskısı → adaptif ceza çarpanı
+    lim = uzuv_mod.LIM()
+    meta = meta_ogrenme_mod.MetaOgrenme(mind, pencere=100, lim=lim)
     # Kendini-geliştirme organı: içsel keşif & serbest hedef motoru
     oz = oz_hedef_mod.OzHedef(mind, drives)
     brain_path = ROOT / cfg["stage"].get("brain", "brain.json")
@@ -895,6 +898,12 @@ def main():
                         res = kul.uygula(act)
                         res["hedef_tip"] = hedef_tip
                         bod.last_cost = int(res.get("cost", 2))
+                        # _dogrula/_kos skorlarını meta_öğrenmeye transfer et:
+                        # öğrenme birikiminin sağlanması (body.ogren → transfer)
+                        meta.transfer(dogru=res.get("dogru"),
+                                      komut_tehlike=res.get(
+                                          "komut_tehlike", 0.0),
+                                      komut_tip=res.get("komut_tip"))
                     elif act == "atolye":
                         # Sahne 1: tek kapı eylem() — işi kendi seçer
                         # (sec_is), sürprizden merak ödülünü o biçer.

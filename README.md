@@ -100,6 +100,13 @@ python3 journal.py replay                            # günlüğü baştan oynat
 python3 journal.py arsivle                           # tarihli arşive taşı
 ```
 
+<p align="center">
+  <img src="resim/1.png" width="22%" alt="Dashboard-1" />
+  <img src="resim/2.png" width="22%" alt="Dashboard-2" />
+  <img src="resim/3.png" width="22%" alt="Dashboard-3" />
+  <img src="resim/4.png" width="22%" alt="DAshboard-4" />
+</p>
+
 Postgres aynası (`memory.py`) 10.10'da kaldırıldı: parola açık metin
 `body.json` içinde duruyordu, ayna tek sürecin "canlı kal" ilkesini
 bozuyordu. `memory.py` → `arsiv/memory.py.postgres-kaldirildi` altında
@@ -327,3 +334,79 @@ DOSYA_HAM   → hexdump -C -n 64 · xxd -l 64  (ilk baytlar)
 - Dosya erişimi sahne (`world/`) ile kilitli; yazma yalnızca yuva kurmak.
 - Ağ: yalnızca 127.0.0.1 kapısı (dışa açılma yok).
 - Bütçe: her tik enerji yakar; biterse organizma **ölür** (`death` günlüğe).
+
+## Meta Öğrenme (MetaOgrenme)
+
+Organizmanın beyin ağırlıkları öğrendikçe, **öğrenme parametrelerini**
+(meta-öğrenme) de iz zaman ince ayar yapar. `meta_ogrenme.py`:
+
+| Parametre | Başlangıç | Fonksiyon |
+|---|---|---|
+| `lr` | 0.02 | learning rate — başarı arttırır, başarısızlık azaltır |
+| `epsilon` | 0.20 | keşif/balans — tükenme eşiğine yaklaştıkça düşer |
+| `decay_lr` / `decay_eps` | 0.9995 / 0.997 | yumuşak çökelti; `sikilma` sinyaline göre sıfırlanabilir |
+| `pristine_lr` | 0.02 | çökelti sonrası tekrar üzerine koyarken referans |
+
+- `saglik_egitim(son_durum)` → **son ortam skorlarından** `lr`/`epsilon` günceller.
+  Düşük enerji / sıkılma → daha agresif keşif; yüksek E ve tazelik →
+  ince ayar. Bu, organizmanın **kendisinin öğrenme metodunu optimize etmesidir**.
+- `MetaOgrenme`'nin durumu `brain.json` içinde `meta:` anahtarıyla
+  kalıcıdır; `--seed` ile tekrarlanabilir.
+- Canlı ölçüm: 7.1s → 12s arası tarama süresinde `epsilon`'ın
+  0.20'den 0.12'ye çökmesi, **keşif hâlâ açık** fakat rutinlerde
+  tutarlılık artıyor.
+
+## Uzuv Sistemi (Uzuv / Limb)
+
+`uzuv.py` organizmanın **komut sınıflandırma ve tehlike modelidir** —
+bedeninin dış uzuvudur:
+
+- **CPU / RAM / Disk limitleri**: `LIM` sınıfı (`cpu_pct`, `ram_pct`),
+  `meta_ogrenme` bu limitleri okuyarak **adaptif ceza** uygular
+  (yüksek kaynak tüketen komutlar yüksek ceza).
+- **Komut sınıflandırması**: her komut `READ` / `EXEC` / `MODIFY` / `NETWORK`
+  sınıflarından birine oturtulur (`komut_tehlike.py → KomutTehlike`).
+- **Canlı süreç izleme**: ag.py Faz 2 sistem yönetim komutlarından
+  (`lscpu`, `free`, `uname`) gerçek zamanlı limit verileri çeker.
+- **Uzuv güvenlik hattı**: `gorev.py → tarama derinlik 8` için
+  `/dev/shm`, `/var/lib/docker` gibi sanal/geçici fs otomatik hariç.
+
+## Komut Tehlike Modeli & --help Öğrenme
+
+Organizma sadece beyaz listedeki 49 komutu bilmiyor — **sistemdeki
+3269 komutu da öğrenebilir**:
+
+- `kullan._sistem_komutlarini_tara()`: `/usr/bin`, `/bin`, `/usr/sbin`,
+  `/sbin` listelerini 50-tikta bir kez cache'ler.
+- Her tikte bu keşfedilmiş komutlardan **5 rastgele örnek** seçilir,
+  `help:<komut>` eylemi `feasible` listesine eklenir.
+- `body.help` → `kul.uygula("help:ls")` → `KomutTehlike.help_ogren("ls")`
+  → `ls --help` çalıştırılır, açıklama `help_aciklamalar` kaydına girer.
+- **Tehlike skoru**: `KomutTehlike` komutun **tipini** (READ/EXEC/MODIFY)
+  `help_aciklamalar` ile birlikte saklar; skor hesabı daha hassas olur.
+- Beyaz listenin dışındaki komutlar `--help` ile öğrenilene kadar
+  **varsayılan ceza** alır (keşif maliyeti).
+
+## AraBeyn: Sağlık & Kurtuluş
+
+`arabeyn.py` organizmanın **yaşam çubuğu** — beyin sağlığını izler:
+
+- **Sinyal**: `brain.py → saglik_egitim()` → son N tikteki ortalama
+  ödül, başarısızlık oranı, sıkılma seviyesi → `MetaOgrenme`'e aktarılır.
+- **Kritik eşik**: ortalama ödül 50 tik altında `saglik_threshold`
+  (varsayılan 0.15) → **canlandırma (revive)**: `epsilon` sıfırlanır,
+  `lr` pristine değere döner, keşif hızı artır.
+- **Ölüm**: sağlık 0 olduğunda `death` günlüğe yazar, `brain.json`
+  kaybolur — yeniden doğuşta yeni beyin.
+- **Sinyal kaynağı**: `pain`, `relief`, `sikilma` güdülerinden
+  türetilir; beyaz listede olmayan komutlar için `help:` öğrenme
+  ödülü (`ODUL_HELP = 4.0`) sağlığa katkı saper.
+
+## Güncel: tarama haric listesi
+
+| Versiyon | Haric |
+|---|---|
+| 2026-10-27 (şu an) | `/proc`, `/sys`, `/dev`, `/run`, `/tmp`, `/var/tmp`, `/snap`, `/dev/shm`, `/var/lib/docker` |
+
+`tarama:"duvar"` 8-derinlikte bu dizinlerde **takılı kalmaz**; kataloğa
+sadece fiziksel/geçici olmayan fs girer.

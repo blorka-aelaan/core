@@ -24,6 +24,7 @@ Deftere yazılan etiket sonraki uyku eğitiminde öncelikli girer
 """
 import json
 import os
+import shutil
 from pathlib import Path
 
 import zeka
@@ -103,6 +104,97 @@ class Uzuv(Risk):
     def load(self, path=None):
         return super().load(path if path is not None
                             else zeka.yol("uzuv.json"))
+
+
+class LIM:
+    """CPU / RAM / disk limit izleyicisi — meta_öğrenme için kaynak baskı analizi.
+
+    Uzuv'ün dış uzuvu: komutun yaşam sistemindeki gerçek kaynak
+    etkisini ölçer. meta_ogrenme bu verileri okur:
+
+      · Yüksek kaynak tüketen komutlar için daha agresif ceza
+      · Sistem boşta (düşük kullanım) daha tutuk / hızlı keşif
+      · Yüksek I/O komutları için epsilon yükselt (geçici çökün)
+
+    Platform bağımsız: /proc/meminfo yoksa 0; shutil.disk_usage her yerde.
+    """
+
+    # Varsayılan limitler (%) — 2026-10-27 (şu an)
+    CPU_LIMIT = 70.0
+    RAM_LIMIT = 75.0
+    DISK_LIMIT = 85.0
+
+    def __init__(self, cpu_limit=None, ram_limit=None, disk_limit=None):
+        self.cpu_limit = float(cpu_limit or self.CPU_LIMIT)
+        self.ram_limit = float(ram_limit or self.RAM_LIMIT)
+        self.disk_limit = float(disk_limit or self.DISK_LIMIT)
+
+    # --- anlık ölçümler ---
+
+    def cpu_pct(self):
+        """CPU kullanım yüzdesi (1 dk load average / cpu_count)."""
+        try:
+            load1, _, _ = os.getloadavg()
+            ncpu = os.cpu_count() or 1
+            return min(100.0, (load1 / ncpu) * 100.0)
+        except (OSError, ValueError):
+            return 0.0
+
+    def ram_pct(self):
+        """RAM kullanım yüzdesi (/proc/meminfo → MemTotal − MemAvailable)."""
+        try:
+            with open("/proc/meminfo", encoding="utf-8") as f:
+                mem = {}
+                for line in f:
+                    parts = line.split(":")
+                    if len(parts) == 2:
+                        mem[parts[0].strip()] = int(
+                            parts[1].strip().split()[0])
+                total = mem.get("MemTotal", 0)
+                avail = mem.get("MemAvailable", mem.get("MemFree", 0))
+                if total > 0:
+                    return min(100.0, ((total - avail) / total) * 100.0)
+        except (OSError, ValueError):
+            pass
+        return 0.0
+
+    def disk_pct(self, path="/"):
+        """Disk kullanım yüzdesi (shutil.disk_usage)."""
+        try:
+            u = shutil.disk_usage(path)
+            if u.total > 0:
+                return min(100.0, (u.used / u.total) * 100.0)
+        except (OSError, ValueError):
+            pass
+        return 0.0
+
+    # --- durum & adaptif ceza ---
+
+    def durum(self):
+        """Tüm limitlerin mevcut durumu."""
+        return {
+            "cpu_pct": round(self.cpu_pct(), 1),
+            "ram_pct": round(self.ram_pct(), 1),
+            "disk_pct": round(self.disk_pct(), 1),
+            "cpu_limit": self.cpu_limit,
+            "ram_limit": self.ram_limit,
+            "disk_limit": self.disk_limit,
+        }
+
+    def adaptif_ceza(self):
+        """Kaynak baskısına göre ceza çarpanı (1.0 = normal).
+
+        Limit aşımında çarpan > 1.0; maksimum 5.0×.
+        meta_ogrenme bu çarpanı lr/epsilon ayarlarında kullanır.
+        """
+        d = self.durum()
+        f = 1.0
+        for pct, lim in ((d["cpu_pct"], self.cpu_limit),
+                         (d["ram_pct"], self.ram_limit),
+                         (d["disk_pct"], self.disk_limit)):
+            if pct > lim:
+                f *= 1.0 + (pct - lim) / (100.0 - lim)
+        return min(f, 5.0)
 
 
 def son_cekim(yol=None):

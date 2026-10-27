@@ -1267,7 +1267,8 @@ class Kullan:
                 "kind": "act", "dogru": dogru, "argv": argv,
                 "deneme": deneme, "duraklama": duraklama,
                 "komut_tehlike": _skor,
-                "komut_ceza": _komut_tehlike_ceza}
+                "komut_ceza": _komut_tehlike_ceza,
+                "komut_tip": komut_tehlike_mod._komut_tipi(komut)}
 
     # ---------- komut tehlike profili yardımcıları ----------
 

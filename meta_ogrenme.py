@@ -44,7 +44,7 @@ class MetaOgrenme:
 
     BAĞLAMLAR = ("tehlike", "aclik", "rahatlama", "uyku")
 
-    def __init__(self, brain, pencere=100):
+    def __init__(self, brain, pencere=100, lim=None):
         self.brain = brain
         self.pencere = int(pencere)
 
@@ -76,6 +76,44 @@ class MetaOgrenme:
 
         self.tik = 0
         self.son_baglam = None
+
+        # --- Yeni: komut doğrulama skorları (kullan._dogrula / _kos) ---
+        # body.ogren() → meta_ogrenme.transfer() bağlantısı:
+        # _dogrula doğrulama sonuçları ve komut tehlike skorları
+        # meta_ogrenmeye aktarılır → öğrenme birikir.
+        self.son_dogrulama = None     # son _dogrula sonucu (True/False)
+        self.son_tehlike = None       # son komut_tehlike skoru (0..1)
+        self.son_komut_tip = None     # son komut tipi (READ/EXEC/MODIFY/NETWORK)
+        self.dogrulama_gecmensi = deque(maxlen=50)  # son 50 doğrulama
+
+        # --- Uzuv LIM: kaynak limit izleyicisi ---
+        # CPU/RAM/disk baskısı → adaptif ceza çarpanı
+        self.lim = lim  # uzuv.LIM instance (None olabilir)
+
+    # ------ komut doğrulama skorlarını transfer et ------
+    # body.ogren() → meta_ogrenme.transfer() bağlantısı:
+    # _dogrula/_kos skorları meta_öğrenmenin kaynak baskı ve
+    # keşif analizine entegre edilir → öğrenme birikir.
+
+    def transfer(self, dogru=None, komut_tehlike=None, komut_tip=None):
+        """Komut doğrulama skorlarını meta-öğrenmeye aktar.
+
+        Parameters
+        ----------
+        dogru : bool or None
+            Komut çıkısının hedefi karşılayıp karşılamadığı (_dogrula).
+        komut_tehlike : float or None
+            Komut tehlike skoru (_kos → _komut_tehlike.tahmin).
+        komut_tip : str or None
+            Komut tipi: READ / EXEC / MODIFY / NETWORK.
+        """
+        if dogru is not None:
+            self.son_dogrulama = bool(dogru)
+            self.dogrulama_gecmensi.append(1.0 if dogru else 0.0)
+        if komut_tehlike is not None:
+            self.son_tehlike = float(komut_tehlike)
+        if komut_tip is not None:
+            self.son_komut_tip = komut_tip
 
     # -------------------------------------------------------------- uyku
     def uyku_basla(self):
@@ -210,6 +248,27 @@ class MetaOgrenme:
         else:
             damp = 1.00
 
+        # ---- Komut doğrulama skorları (transfer → meta_ogrenme) ----
+        # _dogrula başarısı düşükse → daha fazla keşif (epsilon artar);
+        # tehlike skoru yüksekse → daha temkinli öğrenme (lr azalır).
+        if self.dogrulama_gecmensi and len(self.dogrulama_gecmensi) >= 5:
+            dogruluk = sum(self.dogrulama_gecmensi) / len(
+                self.dogrulama_gecmensi)
+            if dogruluk < 0.5:
+                t_eps *= 1.25          # doğru komut seçilemiyor → keşfet
+            elif dogruluk > 0.7:
+                t_eps *= 0.90          # iyi öğreniyor → daha tutuk
+
+        if self.son_tehlike is not None and self.son_tehlike > 0.7:
+            t_lr *= 0.85               # tehlikeli komut → daha dikkatli
+
+        # ---- Uzuv LIM: kaynak baskısı → daha dikkatli ----
+        if self.lim:
+            ceza = self.lim.adaptif_ceza()
+            if ceza > 1.0:
+                t_lr *= 0.90
+                t_eps *= 1.10
+
         lr_target = self.lr_base * ctx_lr * t_lr
         eps_target = self.epsilon_base * ctx_eps * t_eps
 
@@ -257,4 +316,13 @@ class MetaOgrenme:
             "pencere_boyutlari": {
                 b: len(p) for b, p in self.odul_gecmisi.items()
             },
+            # ---- Yeni: komut doğrulama & LIM transfer skorları ----
+            "dogrulama_skoru": (
+                round(sum(self.dogrulama_gecmensi) / len(self.dogrulama_gecmensi), 3)
+                if self.dogrulama_gecmensi else None
+            ),
+            "son_tehlike": round(self.son_tehlike, 3)
+                if self.son_tehlike is not None else None,
+            "son_komut_tip": self.son_komut_tip,
+            "lim_durum": self.lim.durum() if self.lim else None,
         }

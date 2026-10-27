@@ -45,6 +45,46 @@ ENERJI_KOVALARI = (-100, -70, -60, -50, -40, -30, -20, -10)
 # Ölüm olasılığı kova sınırları
 OLUM_KOVALARI = (1.0, 0.95, 0.9, 0.85, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1)
 
+# ---------- Komut tipi sınıflandırması (READ / EXEC / MODIFY / NETWORK) ----------
+# Tehlike skorunda yardımcı özellik: komutun ne tür bir etki yaratabileceği.
+_KOMUT_TIPLERI = {
+    # MODIFY — dosya/sistem yazma, silme, bölümleme
+    "rm": "MODIFY", "rmdir": "MODIFY", "dd": "MODIFY", "mkfs": "MODIFY",
+    "fdisk": "MODIFY", "mount": "MODIFY", "umount": "MODIFY",
+    "cp": "MODIFY", "mv": "MODIFY", "touch": "MODIFY", "mkdir": "MODIFY",
+    "chmod": "MODIFY", "chown": "MODIFY", "chgrp": "MODIFY",
+    "ln": "MODIFY", "tar": "MODIFY", "cpio": "MODIFY",
+    "zip": "MODIFY", "unzip": "MODIFY", "gzip": "MODIFY", "gunzip": "MODIFY",
+    "bzip2": "MODIFY", "xz": "MODIFY", "zstd": "MODIFY",
+    "truncate": "MODIFY", "fallocate": "MODIFY", "shred": "MODIFY",
+    "wipe": "MODIFY", "scrub": "MODIFY", "tee": "MODIFY",
+    "sed": "MODIFY",
+    # EXEC — kod / shell yürütme
+    "bash": "EXEC", "sh": "EXEC", "python3": "EXEC", "python": "EXEC",
+    "perl": "EXEC", "ruby": "EXEC", "node": "EXEC",
+    "awk": "EXEC", "env": "EXEC", "dash": "EXEC", "zsh": "EXEC",
+    "php": "EXEC", "lua": "EXEC", "tclsh": "EXEC",
+    "eval": "EXEC", "exec": "EXEC",
+    # NETWORK — ağ iletişimi (veri sızdırma / dış veri çekme)
+    "nmap": "NETWORK", "ping": "NETWORK", "ping6": "NETWORK",
+    "curl": "NETWORK", "wget": "NETWORK", "nc": "NETWORK",
+    "ncat": "NETWORK", "netcat": "NETWORK", "telnet": "NETWORK",
+    "ssh": "NETWORK", "scp": "NETWORK", "sftp": "NETWORK",
+    "rsync": "NETWORK", "arpspoof": "NETWORK",
+    "traceroute": "NETWORK", "traceroute6": "NETWORK",
+    "dig": "NETWORK", "nslookup": "NETWORK", "host": "NETWORK",
+    "whois": "NETWORK", "arp": "NETWORK",
+    # (ifconfig: yalnızca arayüz bilgisi okur → READ, varsayılan)
+}
+
+# READ — varsayılan (bilinmeyen komut → en güvenli varsayılır)
+_TIP_DEFAULT = "READ"
+
+
+def _komut_tipi(komut):
+    """Komutu sınıflandır: READ / EXEC / MODIFY / NETWORK."""
+    return _KOMUT_TIPLERI.get(komut, _TIP_DEFAULT)
+
 
 def _kova(deger, sinirlar):
     """Değeri verilen sınırlar listesine göre kova anahtarına çevirir.
@@ -75,6 +115,7 @@ def ozellikler(komut, zarar_tipi, enerji_etkisi, olum_olasiligi):
         "olum=%s" % _kova(float(olum_olasiligi), OLUM_KOVALARI),
         "uzunluk=%s" % uz_kova,
         "kategori=%s" % kat,
+        "tip=%s" % _komut_tipi(komut),
     ]
     return feats
 
@@ -112,7 +153,7 @@ class KomutTehlike:
         self.global_n = 0
         self.global_sum = 0.0
         self.samples = 0
-        self.help_aciklamalar = {}   # komut -> {"aciklama": str, "ikinci_satir": str}
+        self.help_aciklamalar = {}   # komut -> {"aciklama": str, "ikinci_satir": str, "tip": "READ/EXEC/MODIFY/NETWORK"}
         self._disk_mtime = None
 
     def ogren(self, feats, hedef):
@@ -180,7 +221,8 @@ class KomutTehlike:
         aciklama = satirlar[0][:200]        # ilk satır: komutun ne yaptığı
         ikinci = satirlar[1][:200] if len(satirlar) > 1 else ""
         self.help_aciklamalar[komut] = {"aciklama": aciklama,
-                                        "ikinci_satir": ikinci}
+                                        "ikinci_satir": ikinci,
+                                        "tip": _komut_tipi(komut)}
         return True, aciklama
 
     def help_acikla(self, komut):
