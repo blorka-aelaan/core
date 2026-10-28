@@ -103,6 +103,9 @@ _HELP_TIP_KEYWORDS = {
                "extract", "mount", "disk", "file system", "partition"],
     "EXEC": ["execute", "run", "shell", "interpreter", "script",
              "command interpreter", "binary", "program"],
+    "READ": ["list", "show", "print", "display", "view", "read",
+             "cat", "head", "tail", "grep", "find", "search",
+             "information about", "describe", "stat", "ls"],
 }
 
 def _help_tip_from_text(komut, text):
@@ -122,6 +125,17 @@ def _help_tip_from_text(komut, text):
 
 # READ — varsayılan (bilinmeyen komut → en güvenli varsayılır)
 _TIP_DEFAULT = "READ"
+
+# Tip → soft threat hedefi (0..1). Help metninden öğrenme için:
+# "remove" → MODIFY → 0.7; "network" → NETWORK → 0.5; vs.
+# Bu sınıflandırma veri setindeki komutların ortalama tehlike skorlarından
+# türetilmiştir (self-supervised learning sinyali).
+_TIP_TO_SOFT_TARGET = {
+    "READ": 0.10,
+    "EXEC": 0.50,
+    "MODIFY": 0.70,
+    "NETWORK": 0.55,
+}
 
 
 def _komut_tipi(komut):
@@ -211,9 +225,10 @@ class KomutTehlike:
         self.samples = 0
         self.help_aciklamalar = {}   # komut -> {"aciklama": str, "ikinci_satir": str, "tip": "READ/EXEC/MODIFY/NETWORK"}
         self._disk_mtime = None
+        self._last_help_exit = None
 
     def ogren(self, feats, hedef):
-        pred = self.tahmin(feats)
+        pred = self.tahmin(feats=feats)
         err = float(hedef) - pred
         n_f = max(1, len(feats))
         for f in feats:
@@ -228,10 +243,19 @@ class KomutTehlike:
     def tahmin(self, komut=None, zarar_tipi=None,
                enerji_etkisi=None, olum_olasiligi=None,
                feats=None):
-        """Tehlike skoru döner (0..1)."""
+        """Tehlike skoru döner (0..1).
+
+        Eğer komutun help_aciklamalar'ı varsa, help_kw=... özelliklerini
+        otomatik ekler (help_ogren ile öğrenilmiş keyword'ler).
+        """
         if feats is None:
             feats = ozellikler(komut or "", zarar_tipi or "",
                                enerji_etkisi or 0, olum_olasiligi or 0)
+            # Help keyword'leri: help_ogren ile öğrenilmişsa ekle
+            if komut and komut in self.help_aciklamalar:
+                _entry = self.help_aciklamalar[komut]
+                _text = _entry.get("aciklama", "") + " " + _entry.get("ikinci_satir", "")
+                feats += self._help_keywordler(_text)
         if self.global_n:
             base = self.global_sum / self.global_n
         else:
@@ -292,11 +316,29 @@ class KomutTehlike:
         out = out[:max_bytes]
         # Çıkış kodu 0 olmalı (sh --help → exit 1, hata mesajı → None)
         if p.returncode != 0:
+            self._last_help_exit = p.returncode
             return None
         satirlar = [s.strip() for s in out.splitlines() if s.strip()]
         if not satirlar:
+            self._last_help_exit = p.returncode
             return None
         return satirlar
+
+    def _help_keywordler(self, text, max_kw=5):
+        """Help metninden anlamlı keyword'leri çıkarır.
+
+        Stopword'lar atlanır, sadece MODIFY/NETWORK keyword'leri
+        (tehlike öğrenmesi için en değerli). En fazla max_kw tane.
+        """
+        import re
+        t = text.lower()
+        kws = []
+        for tip, keywords in _HELP_TIP_KEYWORDS.items():
+            for kw in keywords:
+                pat = re.compile(r"\b" + re.escape(kw) + r"\b")
+                if pat.search(t):
+                    kws.append("help_kw=%s" % kw)
+        return kws[:max_kw]
 
     def help_ogren(self, komut, timeout=5):
         """<komut> --help'ını çalıştırıp açıklamasını kaydeder.
@@ -314,7 +356,12 @@ class KomutTehlike:
             return True, self.help_aciklamalar[komut]["aciklama"]
         satirlar = self._help_calistir(komut, timeout=timeout)
         if satirlar is None:
-            return False, "help_yok"
+            import shutil as _sh
+            _yol = _sh.which(komut, path="/usr/bin:/bin:/usr/sbin:/sbin")
+            if not _yol:
+                return False, "help_yok:%s bulunamadi" % komut
+            exit_code = self._last_help_exit or 1
+            return False, "help_yok:%s --help exit=%d" % (komut, exit_code)
         # "Usage:" / "Kullanım:" satırlarını ve "or:" devamlarını atla
         anlamli = []
         for s in satirlar:
@@ -343,6 +390,16 @@ class KomutTehlike:
             "tip": tip,
             "stdout_ilk": satirlar[0][:100] if satirlar else "",
         }
+        # --- Help metninden self-supervised öğrenme ---
+        # Tip bazlı soft hedef + keyword özellikleriyle modeli güncelle.
+        # Örnek: "Remove (unlink) the FILE(s)" → tip=MODIFY → hedef=0.7
+        #        help_kw=remove → model "remove" keyword'ünin tehlikeli
+        #        olduğunu öğrenir.
+        _soft_hedef = _TIP_TO_SOFT_TARGET.get(tip, 0.1)
+        _help_feats = ["komut=%s" % komut, "tip=%s" % tip]
+        _help_feats += self._help_keywordler(text)
+        if _help_feats:
+            self.ogren(_help_feats, _soft_hedef)
         return True, aciklama
 
     def help_acikla(self, komut):
