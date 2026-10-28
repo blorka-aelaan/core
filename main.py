@@ -1350,6 +1350,21 @@ def main():
                         mind.save(brain_path)
                         jour.log("konsolide_gunduz", silinen=budanan,
                                  links=len(mind.w))
+                    # --- komut_tehlike & guvenlik: help_aciklamalar + öğrenme kaybını diske yaz ---
+                    if kul.aktif:
+                        kul._komut_tehlike.save()
+                        jour.log("komut_tehlike_save",
+                                 samples=kul._komut_tehlike.samples,
+                                 help=len(kul._komut_tehlike.help_aciklamalar))
+                    if guv_ok:
+                        guv.save()
+                        jour.log("guvenlik_save",
+                                 samples=guv.samples, kova=len(guv.n))
+                    if paket_ok:
+                        paket_beyin.save()
+                        jour.log("paket_save",
+                                 ornek=paket_beyin.ornek,
+                                 bilgi=len(paket_beyin.bilgi))
 
             # RETANSİYON (Aşama 5): arşivlenen günlüğün dizininde yaş/boyut
             # sınırı. %200 arşivleme isabeti taşıyabilir; %1000'de periyodik.
@@ -1387,6 +1402,19 @@ def main():
                 jour.log("damak_save_atlandi",
                          not_="dosya dışarıdan yeniden eğitilmiş, "
                               "korundu")
+        # --- kalıcı: komut_tehlike (help_aciklamalar), guvenlik, paket ---
+        if kul.aktif:
+            kul._komut_tehlike.save()
+            jour.log("komut_tehlike_save",
+                     samples=kul._komut_tehlike.samples,
+                     help=len(kul._komut_tehlike.help_aciklamalar))
+        if guv_ok:
+            guv.save()
+            jour.log("guvenlik_save", samples=guv.samples, kova=len(guv.n))
+        if paket_ok:
+            paket_beyin.save()
+            jour.log("paket_save", ornek=paket_beyin.ornek,
+                     bilgi=len(paket_beyin.bilgi))
         if not drives.alive:
             # Z3: ölüm anında kategori tahmini kayda (gerçek-sonuç tohumu):
             # organizma daha hiç ölmedi; ilk ölümde tahmin-vs-gerçek

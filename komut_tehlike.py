@@ -9,19 +9,21 @@ Kayıt: zeka/komut_tehlike.json (atomik).
 
 Özellik uzayı:
   - komut=<isim>            (tekil komut kimliği)
-  - zarar=<tip>             (dosya_silme, disk_yazma, sistem_kontrolu, ...)
+  - zarar=<tip>             (dosya_silme, disk_yazma, sistem_kontrolu, ...
   - enerji=<kova>           (enerji_etkisi kova: -100, -70, ..., -10)
-  - olum=<kova>             (olum_olasiligi kova: 1.0, 0.95, ..., 0.1)
+  - uzunluk=<kisa/orta/uzun> (komut adı uzunluğu)
+  - kategori=<tip>          (zarar_tipi'nin ilk bölümü)
+  - tip=<READ/EXEC/MODIFY/NETWORK> (komut tipi haritası + prefix/keyword)
 
 Tahmin = global_ortalama + aktif özelliklerin delta ortalaması.
 Hedef = olum_olasiligi (gerçekte bu komut ne kadar ölütür).
 
-YENİ: --help öğrenme
-  - help=<komut>            (komutun --help çıktısından çıkarılan anahtar kelime)
-  - komut_aciklama=<metin>  (komutun --help'ından elde edilen kısa açıklama)
-
-Model, --help çıktısını kaydeder ve organizma komutun ne işe
-yaradığını öğrenebilir.
+YENİ: --help öğrenme (güvenli subprocess, tip refine, ilk-keşif ödülü)
+Model, --help çıktısını güvenli altyapıda (shutil.which, stdin=DEVNULL,
+start_new_session, killpg, 8KB limit, sadece --help) çalıştırır.
+Exit code 0 zorunlu; "Usage:"/"Kullanım:" satırları atlanır.
+Help metnindeki keyword'ler word-boundary regex ile komut tipini
+refine eder. save() her 500 tik + finally'de çağrılır.
 
 Kullanım:
     m = KomutTehlike(); m.load()
@@ -32,6 +34,9 @@ Kullanım:
 
 import json
 import os
+import re
+import shutil
+import signal
 from pathlib import Path
 
 import zeka
@@ -77,13 +82,65 @@ _KOMUT_TIPLERI = {
     # (ifconfig: yalnızca arayüz bilgisi okur → READ, varsayılan)
 }
 
+# Prefix ve keyword matching: tam eşleşmeyi kaçıran komutlar için.
+# mkfs.ext4 → mkfs → MODIFY, iptables → NETWORK, wipefs → MODIFY gibi.
+_TIP_PREFIXES = {
+    "mkfs": "MODIFY", "wipefs": "MODIFY", "fdisk": "MODIFY", "mount": "MODIFY",
+    "iptables": "NETWORK", "nft": "NETWORK", "ip": "NETWORK",
+    "dpkg": "MODIFY", "apt": "MODIFY", "apt-get": "MODIFY",
+    "yum": "MODIFY", "dnf": "MODIFY", "pip": "EXEC", "gem": "EXEC",
+}
+
+# Help metnindeki anahtar kelimilerden tip çıkarma.
+# --help çıktısı "List information about the FILEs" gibi açıklamalarda
+# işaretleyici kelimeler var; bunlar komutun gerçek tipini gösterir.
+_HELP_TIP_KEYWORDS = {
+    "NETWORK": ["network", "ip address", "route", "port", "tcp", "udp",
+                "socket", "connect", "download", "upload", "transfer", "dns",
+                "ping", "ssh", "ftp", "server", "client", "firewall", "iptables"],
+    "MODIFY": ["delete", "remove", "create", "write", "copy", "move", "rename",
+               "mkdir", "chmod", "chown", "format", "truncate", "compress",
+               "extract", "mount", "disk", "file system", "partition"],
+    "EXEC": ["execute", "run", "shell", "interpreter", "script",
+             "command interpreter", "binary", "program"],
+}
+
+def _help_tip_from_text(komut, text):
+    """Help metnindeki anahtar kelimilerden komut tipini refine eder.
+
+    Word-boundary kontrolü: "format" in "information" gibi false positive'ler
+    önlenir (regex \\b). Metinde NETWORK/MODIFY/EXEC keyword'leri varsa onu döner,
+    yoksa None → _komut_tipi() haritasından varsayılan.
+    """
+    t = text.lower()
+    for tip, keywords in _HELP_TIP_KEYWORDS.items():
+        for kw in keywords:
+            pat = re.compile(r"\b" + re.escape(kw) + r"\b")
+            if pat.search(t):
+                return tip
+    return None  # haritaya düş
+
 # READ — varsayılan (bilinmeyen komut → en güvenli varsayılır)
 _TIP_DEFAULT = "READ"
 
 
 def _komut_tipi(komut):
-    """Komutu sınıflandır: READ / EXEC / MODIFY / NETWORK."""
-    return _KOMUT_TIPLERI.get(komut, _TIP_DEFAULT)
+    """Komutu sınıflandır: READ / EXEC / MODIFY / NETWORK.
+
+    1) Tam eşleşme: 450+ komut haritası _KOMUT_TIPLERI
+    2) Prefix: mkfs.ext4 → mkfs → MODIFY, iptables-restore → NETWORK
+    3) Keyword in name: dpkg-reconfigure → dpkg → MODIFY
+    4) Varsayılan: READ (en güvenli)
+    """
+    if komut in _KOMUT_TIPLERI:
+        return _KOMUT_TIPLERI[komut]
+    for prefix, tip in _TIP_PREFIXES.items():
+        if komut.startswith(prefix):
+            return tip
+    for kw, tip in _TIP_PREFIXES.items():
+        if kw in komut:
+            return tip
+    return _TIP_DEFAULT
 
 
 def _kova(deger, sinirlar):
@@ -112,7 +169,6 @@ def ozellikler(komut, zarar_tipi, enerji_etkisi, olum_olasiligi):
         "komut=%s" % komut,
         "zarar=%s" % zarar_tipi,
         "enerji=%s" % _kova(float(enerji_etkisi), ENERJI_KOVALARI),
-        "olum=%s" % _kova(float(olum_olasiligi), OLUM_KOVALARI),
         "uzunluk=%s" % uz_kova,
         "kategori=%s" % kat,
         "tip=%s" % _komut_tipi(komut),
@@ -188,18 +244,54 @@ class KomutTehlike:
 
     # ---------- --help öğrenme ----------
 
-    def _help_calistir(self, komut, bayrak, timeout=5):
+    def _help_calistir(self, komut, timeout=5, max_bytes=8192):
+        """<komut> --help'ını güvenli altyapıda çalıştırır.
+
+        - Güvenlik: komut adı regex doğrulaması, shutil.which() ile gerçek yol
+        - stdin=DEVNULL: girdi bekleyen komut takılmaz
+        - start_new_session=True + os.killpg: zaman aşımında tüm süreç grubu ölür
+        - max 8KB çıktı: bellek tükünmesi önlenir
+        - sadece "--help": "-h" kaldırıldı (shutdown -h gibi tehlikeli bayraklar)
+        """
         import subprocess
-        try:
-            r = subprocess.run([komut, bayrak],
-                               capture_output=True, text=True,
-                               errors="replace", timeout=timeout,
-                               cwd="/tmp")
-        except (FileNotFoundError, PermissionError, OSError,
-                subprocess.TimeoutExpired):
+        # Komut adı doğrulama: güvenli karakterler sadece
+        if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9._+-]{0,31}$", komut):
             return None
-        out = (r.stdout or "") + (r.stderr or "")
-        if not out.strip():
+        # PATH'de güvenle bul, shell injection yok
+        yol = shutil.which(komut,
+                           path="/usr/bin:/bin:/usr/sbin:/sbin")
+        if not yol:
+            return None
+        try:
+            p = subprocess.Popen(
+                [yol, "--help"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True, errors="replace",
+                cwd="/tmp",
+                env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+                start_new_session=True,
+            )
+        except (OSError, FileNotFoundError, PermissionError):
+            return None
+        try:
+            out, _ = p.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
+            try:
+                out, _ = p.communicate(timeout=2)
+            except Exception:
+                out = ""
+            if not out:
+                return None
+        # 8 KB kırp
+        out = out[:max_bytes]
+        # Çıkış kodu 0 olmalı (sh --help → exit 1, hata mesajı → None)
+        if p.returncode != 0:
             return None
         satirlar = [s.strip() for s in out.splitlines() if s.strip()]
         if not satirlar:
@@ -207,22 +299,50 @@ class KomutTehlike:
         return satirlar
 
     def help_ogren(self, komut, timeout=5):
-        """<komut> --help'ını (veya -h')ı çalıştırıp çıktısın anahtar satırlarını kaydeder.
+        """<komut> --help'ını çalıştırıp açıklamasını kaydeder.
 
-        Bazı komutlar --help yerine -h kullanır; her ikisini dener.
+        --help çıktısından:
+        - "Usage:" satırları atlanır (sözdizimi, ne yaptığını anlatmaz)
+        - İlk anlamli satır açıklama, ikinci satır ek bağlam
+        - Help metninden tip (READ/EXEC/MODIFY/NETWORK) çıkarılır
+
         Döner: (basarili, aciklama_str) — başarı True ise aciklama,
                False ise hata mesajı.
         """
-        satirlar = self._help_calistir(komut, "--help", timeout)
-        if satirlar is None:
-            satirlar = self._help_calistir(komut, "-h", timeout)
+        # Zaten öğrenilmişse cache'den dön — tekrar --help çalıştırma
+        if komut in self.help_aciklamalar:
+            return True, self.help_aciklamalar[komut]["aciklama"]
+        satirlar = self._help_calistir(komut, timeout=timeout)
         if satirlar is None:
             return False, "help_yok"
-        aciklama = satirlar[0][:200]        # ilk satır: komutun ne yaptığı
-        ikinci = satirlar[1][:200] if len(satirlar) > 1 else ""
-        self.help_aciklamalar[komut] = {"aciklama": aciklama,
-                                        "ikinci_satir": ikinci,
-                                        "tip": _komut_tipi(komut)}
+        # "Usage:" / "Kullanım:" satırlarını ve "or:" devamlarını atla
+        anlamli = []
+        for s in satirlar:
+            sl = s.lower()
+            if sl.startswith(("usage:", "kullanım:", "utilisation:", "bedienung:")):
+                continue
+            # "or: /usr/bin/wc ..." gibi devam satırları (Usage continuation)
+            if sl.startswith("or: "):
+                continue
+            anlamli.append(s)
+            if len(anlamli) >= 2:
+                break
+        if not anlamli:
+            return False, "help_bos"
+        aciklama = anlamli[0][:200]
+        ikinci = anlamli[1][:200] if len(anlamli) > 1 else ""
+        # Help metninden tip refine et: komut haritası + help keyword'leri
+        tip = _komut_tipi(komut)
+        text = aciklama + " " + ikinci
+        help_tip = _help_tip_from_text(komut, text)
+        if help_tip:
+            tip = help_tip
+        self.help_aciklamalar[komut] = {
+            "aciklama": aciklama,
+            "ikinci_satir": ikinci,
+            "tip": tip,
+            "stdout_ilk": satirlar[0][:100] if satirlar else "",
+        }
         return True, aciklama
 
     def help_acikla(self, komut):

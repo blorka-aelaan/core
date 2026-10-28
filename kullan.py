@@ -1128,17 +1128,26 @@ class Kullan:
         # eylem = "help:ls" → komut = "ls" ama eylem prefix'i "help:" olur
         if eylem.startswith("help:"):
             help_komut = komut
+            onceki = help_komut in self._komut_tehlike.help_aciklamalar
             basarili, aciklama = self._komut_tehlike.help_ogren(help_komut)
             if basarili:
+                # Save hemen — süreç ölürse bile help_aciklamalar kaybolmasın
+                self._komut_tehlike.save()
                 obs = "help:%s -> %s" % (help_komut, aciklama)
                 self.jour.log("komut_help_ogren", komut=help_komut,
-                              aciklama=aciklama)
-                return {"obs": obs, "gain": ODUL_HELP, "cost": MALIYET,
+                              aciklama=aciklama,
+                              ilk_kez=not onceki)
+                # Ödül sadece İLK kez: tekrarlayan help aksiyonunda sıfır
+                _gain = ODUL_HELP if not onceki else 0.0
+                _tip = self._komut_tehlike.help_aciklamalar[
+                    help_komut].get("tip", "READ")
+                return {"obs": obs, "gain": _gain, "cost": MALIYET,
                         "kind": "act", "dogru": True,
                         "argv": [help_komut, "--help"],
                         "komut_tehlike": 0.0,
                         "komut_ceza": False,
-                        "komut_aciklama": aciklama}
+                        "komut_aciklama": aciklama,
+                        "komut_tip": _tip}
             else:
                 obs = "help:%s -> hata: %s" % (help_komut, aciklama)
                 self.jour.log("komut_help_hata", komut=help_komut,
@@ -1151,17 +1160,16 @@ class Kullan:
 
         # ---- Komut tehlike skoru (kendi kendini geliştiren sistem) ----
         # Komutu çalıştırmadan önce modeli sor: "bu komut tehlikeli mi?"
-        # _ZARAR_TABLO'da olmayan komutlar varsayılan güvenli kabul edilir
-        # (skor 0.1) ki ls/cat/ps gibi binlerce komut cezalandırılmasın.
-        if komut in self._ZARAR_TABLO:
-            _skor = self._komut_tehlike.tahmin(
-                komut=komut,
-                zarar_tipi=self._zarar_tipi(komut),
-                enerji_etkisi=self._enerji_etkisi(komut),
-                olum_olasiligi=self._olum_olasiligi(komut),
-            )
-        else:
-            _skor = 0.1  # bilinmeyen komut: varsayılan güvenli
+        # TÜM komutlar için modelden skor al: bilinmeyen komut bile
+        # komut_tip, zarar_tipi, enerji gibi varsayılanlarla puan alır.
+        # (eski: sadece _ZARAR_TABLO'dakiler için; diğerleri 0.1 → model
+        # genellemedi tip = hep READ; fix ile tip prefix/keyword destekli)
+        _skor = self._komut_tehlike.tahmin(
+            komut=komut,
+            zarar_tipi=self._zarar_tipi(komut),
+            enerji_etkisi=self._enerji_etkisi(komut),
+            olum_olasiligi=self._olum_olasiligi(komut),
+        )
         if _skor >= self._komut_tehlike_esik:
             # Çok tehlikeli: çalıştır ama sert ceza ver (organizma öğrenmeli,
             # engellenmez — özgür keşif)

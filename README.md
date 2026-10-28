@@ -381,11 +381,26 @@ Organizma sadece beyaz listedeki 49 komutu bilmiyor — **sistemdeki
 - Her tikte bu keşfedilmiş komutlardan **5 rastgele örnek** seçilir,
   `help:<komut>` eylemi `feasible` listesine eklenir.
 - `body.help` → `kul.uygula("help:ls")` → `KomutTehlike.help_ogren("ls")`
-  → `ls --help` çalıştırılır, açıklama `help_aciklamalar` kaydına girer.
-- **Tehlike skoru**: `KomutTehlike` komutun **tipini** (READ/EXEC/MODIFY)
-  `help_aciklamalar` ile birlikte saklar; skor hesabı daha hassas olur.
-- Beyaz listenin dışındaki komutlar `--help` ile öğrenilene kadar
-  **varsayılan ceza** alır (keşif maliyeti).
+  → `ls --help` **güvensiz subprocess** ile çalıştırılır (`shutil.which()` path
+  çözümleme, `stdin=DEVNULL`, `start_new_session=True`, `killpg` timeout'da,
+  `8 KB` byte çıktı limiti, **sadece `--help`** — `-h` kaldırıldı: `shutdown -h`
+  gibi yan etki riski yok).
+  → Exit code 0 zorunlu; "Usage:"/"Kullanım:" satırları atlanır; ilk **anlamlı**
+  satır açıklama, ikinci satır ek bağlam.
+  → `help_aciklamalar` kaydına: `aciklama`, `ikinci_satir`, `tip`, `stdout_ilk`.
+- **Tip refine etme**: help metnindeki keyword'ler (`"remove"`, `"network"`,
+  `"execute"` gibi) word-boundary regex ile komut tipini (`MODIFY`/`NETWORK`/`EXEC`)
+  `_komut_tipi()` haritasından sonra refine eder. `format`≠`information` gibi
+  false positive'ler engellenir.
+- **İlk-keşif ödülü**: `ODUL_HELP` yalnızca komut **ilk** `help:` kez kazanır;
+  tekrarlayanlar `gain=0.0` (reward hacking önlenir).
+- **Kalıcı kayıt**: `save()` her 500 tik'te + `finally` bloğunda çağrılır;
+  `help_aciklamalar` artık süreç ölürken kaybolmuyor.
+- **Tehlike model genellemesi**: `_ZARAR_TABLO`'ya girmeyen komutlar bile
+  `tahmin()` ile puan alır (eski: hep 0.1). `wipefs`, `mkfs.ext4`, `iptables`
+  prefix/keyword matching ile `MODIFY`/`NETWORK` tipinde.
+- **Target sızıntısı düzeltildi**: `olum=<kova>` feature kaldırıldı
+  (`olum_olasiligi` kova sınırları = hedef kendisiydi).
 
 ## AraBeyn: Sağlık & Kurtuluş
 
