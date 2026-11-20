@@ -60,6 +60,10 @@ def rapor(kayitlar):
             continue
         komut = j.get("komut") or "?"
         if j.get("kind") == "kullan":
+            if (not isinstance(komut, str) or not komut.startswith("cmd:")
+                    or not isinstance(j.get("dogru"), bool)
+                    or j.get("dogrulanmis") is not True):
+                continue
             k = kapi.setdefault(komut, [0, 0])
             k[0] += 1
             if j.get("dogru"):
@@ -85,22 +89,41 @@ def rapor(kayitlar):
 
 
 def tekrar_oynat(mind, kayitlar, epok=1):
-    """gorev:AG_TARA/gorev:BENI_TARA uyaranlı learn kayıtlarını kayıtlı R ile oynat.
+    """Verified, task-tagged AG/BENI command examples ile learn kayıtlarını oynat.
 
     Ödül uydurulmaz: jurnale o an ne yazıldıysa o tekrarlanır. AG_TARA
-    dışı learn satırları seçilmez (hedefli tekrar — ağ öğrenmesinin
-    diğer bağlantılarını bozmaz).
+    dışı, görevi/sonucu doğrulanmamış veya komut olmayan kayıtlar atlanır.
     """
     ornekler = []
+    gorulen = set()
     for j in kayitlar:
         if j.get("kind") != "learn":
             continue
-        stim = j.get("stim") or ""
-        if not any(t in stim for t in ("gorev:AG_TARA", "gorev:BENI_TARA")):
+        hedef = j.get("hedef")
+        if hedef not in ("AG_TARA", "BENI_TARA"):
             continue
-        if "action" not in j or not isinstance(j.get("R"), (int, float)):
-            continue   # R'siz eski learn satırları (hatira ile aynı kural)
-        ornekler.append((stim, j["action"], float(j["R"])))
+        stim = j.get("stim")
+        if not isinstance(stim, str):
+            continue
+        if "gorev:" + hedef not in stim.split("|"):
+            continue
+        action = j.get("action")
+        dogru = j.get("dogru")
+        dogrulanmis = j.get("dogrulanmis")
+        reward = j.get("R")
+        tick = j.get("tick")
+        if (not isinstance(action, str) or not action.startswith("cmd:")
+                or not isinstance(dogru, bool) or dogrulanmis is not True
+                or not isinstance(reward, (int, float))
+                or isinstance(reward, bool)):
+            continue
+        if isinstance(tick, bool) or not isinstance(tick, (int, float)):
+            tick = None
+        kimlik = (tick, hedef, stim, action, dogru)
+        if tick is not None and kimlik in gorulen:
+            continue
+        gorulen.add(kimlik)
+        ornekler.append((stim, action, float(reward)))
     oynanan = 0
     for _ in range(max(1, epok)):
         for stim, act, r in ornekler:

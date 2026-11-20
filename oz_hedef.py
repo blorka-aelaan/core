@@ -11,7 +11,16 @@ Altyapı:
 
 from pathlib import Path
 from collections import deque
+from enum import Enum
 import numpy as np
+
+
+class HedefSeviyesi(Enum):
+    """Hedef öncelik seviyeleri. Düşük değer = daha yüksek öncelik."""
+    ACIL = 1       # hayatta kalma (enerji kritik, acı var)
+    KISA = 2       # temel ihtiyaçlar / güncel görev (1-10 tik)
+    ORTA = 3       # davranış kalıpları / keşif (10-100 tik)
+    UZUN = 4       # öğrenme derinliği / konsolidasyon (100+ tik)
 
 
 class OzHedef:
@@ -41,8 +50,14 @@ class OzHedef:
         self.odul_gecmisi = deque(maxlen=pencere)
         self.keşif_skoru = 0.0  # 0..1 aralığında, 1 = tamamen yeni/astek
 
-        # Hedef deposu: (hedef_tipi, güçlük, bek ожидание ödül)
-        self.hedef_deposu = []
+        # Hiyerarşik hedef deposu: seviye -> liste
+        # Düşük seviye = yüksek öncelik (önce ACIL, sonra KISA, ORTA, UZUN)
+        self.hedef_deposu = {
+            HedefSeviyesi.ACIL: [],
+            HedefSeviyesi.KISA: [],
+            HedefSeviyesi.ORTA: [],
+            HedefSeviyesi.UZUN: [],
+        }
 
         # Bağlam geçmişi
         self.son_baglam = "rahatlama"
@@ -122,7 +137,7 @@ class OzHedef:
         if self.son_baglam == "tehlike":
             # Tehlikeli koşullarda: sadece "gör/sense" veya "rest" hefleri
             yeni = {"tip": "keşif_guvenli", "aciklama": "tehlikeli ortamda duyarlılık artır"}
-            self.hedef_deposu.append(yeni)
+            self.hedef_deposu[HedefSeviyesi.ACIL].append(yeni)
         else:
             # Güvenli koşullarda: novel/complex hedefler
             # Örneğin: yeni bir komut dene, yeni bir yol bul, etc.
@@ -134,11 +149,14 @@ class OzHedef:
                 "aciklama": f"Yeni eylem dene: {novel_commands[idx]}",
                 "eylem": novel_commands[idx],
             }
-            self.hedef_deposu.append(yeni)
+            self.hedef_deposu[HedefSeviyesi.ORTA].append(yeni)
 
     def mevcut_hedef(self):
         """
         Kullanılabilir bir hedef döndürür, deposudan çıkARMADAN (peek).
+
+        Hiyerarşiye göre: önce ACIL, sonra KISA, ORTA, UZUN seviyesinden
+        ilk boş olmayan deponun başındaki hedefi döner.
 
         Hedef eyleme geçirildiğinde main.py'de `hedef_secildi(eylem)` ile
         deposudan temizlenir.
@@ -146,22 +164,29 @@ class OzHedef:
         Dönen
         ------
         dict or None
-            {"tip": str, "aciklama": str, "eylem": str | None}
+            {"tip": str, "aciklama": str, "eylem": str | None, "seviye": HedefSeviyesi}
         """
-        if self.hedef_deposu:
-            return self.hedef_deposu[0]
+        for seviye in (HedefSeviyesi.ACIL, HedefSeviyesi.KISA,
+                       HedefSeviyesi.ORTA, HedefSeviyesi.UZUN):
+            if self.hedef_deposu[seviye]:
+                hedef = dict(self.hedef_deposu[seviye][0])
+                hedef["seviye"] = seviye.name
+                return hedef
         return None
 
     def hedef_secildi(self, eylem):
         """
         Belirtilen eylem seçildiğinde hedef deposundan temizler.
 
-        Aynı hedefin sürekli tekrarlanmasını engeller; eylem gerçekten
-        seçildiğinde (mind.decide tarafından) bir kez tüketilir.
+        Hiyerarşiye göre tüm seviyelerde arar; eşleşen hedefi siler.
+        Aynı hedefin sürekli tekrarlanmasını engeller.
         """
-        if self.hedef_deposu and self.hedef_deposu[0].get("eylem") == eylem:
-            self.hedef_deposu.pop(0)
-            return True
+        for seviye in (HedefSeviyesi.ACIL, HedefSeviyesi.KISA,
+                       HedefSeviyesi.ORTA, HedefSeviyesi.UZUN):
+            depo = self.hedef_deposu[seviye]
+            if depo and depo[0].get("eylem") == eylem:
+                depo.pop(0)
+                return True
         return False
 
     def durum(self):
@@ -170,6 +195,11 @@ class OzHedef:
             "keşif_skoru": round(self.keşif_skoru, 3),
             "baglam": self.son_baglam,
             "trend": {b: round(v, 3) for b, v in self.baglam_trend.items()},
-            "hedef_sayisi": len(self.hedef_deposu),
-            "odul_ortalamasi": round(sum(self.odul_gecmisi) / max(1, len(self.odul_gecmisi)), 3),
+            "hedef_sayisi": {
+                seviye.name.lower(): len(self.hedef_deposu[seviye])
+                for seviye in HedefSeviyesi
+            },
+            "hedef_toplam": sum(len(d) for d in self.hedef_deposu.values()),
+            "odul_ortalamasi": round(
+                sum(self.odul_gecmisi) / max(1, len(self.odul_gecmisi)), 3),
         }

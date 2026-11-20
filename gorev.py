@@ -12,6 +12,7 @@ karar verir. Böylece "iş yapmazsan ceza alırsın" kuralı ikinci bir
 irade gerektirmez — mevcut öğrenilmiş model uygular.
 """
 import json
+import sqlite3
 import time
 from pathlib import Path
 
@@ -387,9 +388,15 @@ class Tezgah:
         if not self.katalog.exists():
             self._supheli_temizle()
             return
-        sonuc = self.depo.ice_aktar(str(self.katalog), str(self.dosyalar))
-        if sonuc.get("yeni_klasor") or sonuc.get("yeni_dosya"):
-            self.jour.log("katalog_goc", **sonuc)
+        try:
+            sonuc = self.depo.ice_aktar(str(self.katalog), str(self.dosyalar))
+            if sonuc.get("yeni_klasor") or sonuc.get("yeni_dosya"):
+                self.jour.log("katalog_goc", **sonuc)
+        except Exception as hata:
+            # Veritabanı kilitliyse (ör. önceki doğuş hâlâ kilitte) veya
+            # herhangi başka bir başlangıç hatası olursa göçü atla;
+            # idempotent olduğu için sonraki başlatmada tekrar denenebilir.
+            self.jour.log("katalog_goc_atlandi", hata=str(hata)[:200])
         self._supheli_temizle()
 
     def _supheli_temizle(self):

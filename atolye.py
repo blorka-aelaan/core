@@ -40,8 +40,11 @@ geçmişten öğrenilir (.beklenen.json), sürpriz = |gerçek Δ − beklenen Δ
 Sahne 2b'de uygulanamaz iş SEÇİLMEZ (serbest adaylar kapıdan geçer) ve
 erken dönüş (no-op) sayıma girmez — sayımlar "gerçekten denenmiş iş"dir.
 """
+import ast
 import json
+import py_compile
 import random
+import time
 from pathlib import Path
 
 
@@ -89,6 +92,10 @@ class Atolye:
         # .durum.json'da sayılmaz (web nesne listesini oradan okur).
         self.yedek_kok = self.kok / ".yedek"
         self.yedek_kok.mkdir(parents=True, exist_ok=True)
+        # ---------- Yeni: Kod düzenleme korumaları ----------
+        self.kod_duzenle_cooldown_sn = 60.0     # 60 sn'de en fazla bir kod değişikliği
+        self.son_kod_duzenle_zamani = 0.0
+        self.kod_degisiklik_gecmisi = []         # {dosya, zaman, onceki_bayt, yeni_bayt, basarili, mesaj}
         # ESKİ DÜNYA DÜZELTMESİ: sahte onarım (içeriği okuyup geri yazma)
         # "?" dolu dosyaları "bozuk" işaretlemeden bırakmıştı → kayıt
         # sağlıklı görünürken içerik çöptü (canlıda 15 nesne). Yükleme
@@ -486,10 +493,19 @@ class Atolye:
         beklentiye de işlemez, sürpriz/ödül üretmez (tek kapı dürüstlüğ).
         """
         on = self.durum_vek()
-        res = {"yarat": lambda: self.yarat(icerik),
-               "bak": self.bak, "tasi": self.tasi,
-               "sil": self.sil, "kur": self.kur,
-               "guc": self.guc}[is_]()
+        if is_ == "kod_duzenle":
+            # icerik format: "dosya.py|yeni icerik"
+            if "|" not in icerik:
+                res = {"obs": "biçim: dosya.py|icerik", "kind": "atolye", "bos": 1}
+            else:
+                dosya, icerik2 = icerik.split("|", 1)
+                ok, mesaj = self.kod_duzenle(dosya.strip(), icerik2)
+                res = {"obs": mesaj, "kind": "atolye", "bos": not ok}
+        else:
+            res = {"yarat": lambda: self.yarat(icerik),
+                   "bak": self.bak, "tasi": self.tasi,
+                   "sil": self.sil, "kur": self.kur,
+                   "guc": self.guc}[is_]()
         # Sahne 2b: her çalışma sayılır — ihtiyaç refleksi de, serbest
         # bant keşfi de. Sayımlar sec_is'in keşif tercihini besler ve
         # kalıcıdır (.kesif.json): "bugüne kadar neyi ne kadar yaptım?"
@@ -679,7 +695,7 @@ class Atolye:
         return "bayrak"         # içerik sağlam: sadece bayrak eski
 
     def bak(self):
-        """Bak (oku + tazele → bozulmayı önle). Bozuk varsa öncelik onlar:
+        """Bak (oku + tazele → bozulmayı önle). Bozuk varsa TÜMÜ onarılır:
         onarım bir iştir, rastgele okuma değil. Onarım malzemeyi KORUR:
         içerik tam yazılır (guc ile aynı tam tur — [:80] kesik yok) ve
         yazım hatası eylemi çökertmez (guc'un try/except kapısı).
@@ -688,30 +704,38 @@ class Atolye:
         diski okuyup geri yazmak sahte onarımdır (içerik "?" kalır).
         Bu yüzden onarım YEDEKTEN yükler (.yedek/<ad>). Yedek yoksa
         nesne bozuk kalır (uydurma onarım yok) — durum dürüstçe raporlanır.
+
+        Tüm bozuk ve onarılabilir nesneler tek eylemde onarılır, böylece
+        bozulma geri çevrilebilir ve dünya sağlığı toplanabilir.
         """
         bozuklar = [a for a, v in self.nesneler.items()
                     if (self.kok / a).exists() and v.get("bozuk")
                     and self._onarilabilir(a)]
-        saglam = [a for a, v in self.nesneler.items()
+        sagmal = [a for a, v in self.nesneler.items()
                   if (self.kok / a).exists() and not v.get("bozuk")]
-        aday = bozuklar or saglam   # onarım öncelikli (sonuç-odaklı)
-        if not aday:
+        if not bozuklar and not sagmal:
             return {"obs": "atölye boş", "kind": "atolye", "novel": 0,
                     "bos": 1}
-        ad = random.choice(aday)
-        p = self.kok / ad
-        if self.nesneler[ad].get("bozuk"):
-            # gerçek onarım: orijinal içerik yedeğten (yoksa kurtarma
-            # imkânı yoksa nesne bozuk kalır — uydurma iyileşme yok)
+
+        onarilan = 0
+        # Tüm bozuk ve onarılabilir nesneleri tek seferde onar.
+        for ad in bozuklar:
             if self._onar(ad) is not None:
                 self.nesneler[ad]["bozuk"] = False
-        try:
-            icerik = p.read_text(encoding="utf-8")   # tam içerik: malzeme
-        except OSError:
-            icerik = "(kayıp)"
-        self.nesneler[ad]["son_bakim"] = self.tik
+                self.nesneler[ad]["son_bakim"] = self.tik
+                onarilan += 1
+
+        # Bozuk kalmayan bir nesne varsa (onarım veya zaten sağmal) onu da
+        # tazele: son_bakim'i güncelle → bozulma sayacı sıfırlanır.
+        for ad in sagmal:
+            self.nesneler[ad]["son_bakim"] = self.tik
+
         self._durum_kaydet()
-        return {"obs": "bakıldı %s: %s" % (ad, icerik[:40]),
+        if onarilan:
+            return {"obs": "bakıldı: %d bozuk onarıldı, %d sağmal tazelendi"
+                    % (onarilan, len(sagmal)),
+                    "kind": "atolye", "novel": 0, "gain": 0}
+        return {"obs": "bakıldı: %d sağmal tazelendi (bozuk yok)" % len(sagmal),
                 "kind": "atolye", "novel": 0, "gain": 0}
 
     def tasi(self):
@@ -776,6 +800,135 @@ class Atolye:
         self.nesneler.pop(ad, None)
         self._durum_kaydet()
         return {"obs": "silindi: %s (kota açıldı)" % ad, "kind": "atolye"}
+
+    # ---------- Yeni: Kendi kodunu düzenleme izni (Aşama 4 / AST sandbox) ----------
+
+    KOD_YASAKLI = {
+        # Tehlikeli çağrılar: AST Call düğümündeki func adı
+        "os.system", "os.popen", "subprocess.call", "subprocess.run",
+        "subprocess.Popen", "subprocess.check_output", "subprocess.check_call",
+        "eval", "exec", "compile", "__import__", "getattr", "setattr",
+        "delattr", "open", "input", "breakpoint",
+    }
+    KOD_YASAKLI_MOD = {
+        # Tehlikeli modüller: import(...) içinde
+        "os", "subprocess", "sys", "socket", "ctypes", "multiprocessing",
+        "shutil", "glob", "importlib", "pty",
+    }
+
+    def _ast_guvenli_mi(self, icerik):
+        """AST ile Python kaynağını tarar; yasaklı çağrı/import yoksa True."""
+        try:
+            tree = ast.parse(icerik)
+        except SyntaxError:
+            return False, "sözdizimi hatası"
+        for node in ast.walk(tree):
+            # Import kontrolü
+            if isinstance(node, ast.ImportFrom):
+                mod = node.module or ""
+                for alias in node.names:
+                    ad = (mod + "." + alias.name) if mod else alias.name
+                    kök = ad.split(".")[0]
+                    if kök in self.KOD_YASAKLI_MOD:
+                        return False, "yasaklı import: %s" % kök
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    kök = alias.name.split(".")[0]
+                    if kök in self.KOD_YASAKLI_MOD:
+                        return False, "yasaklı import: %s" % kök
+            # Çağrı kontrolü
+            if isinstance(node, ast.Call):
+                func = node.func
+                ad = None
+                if isinstance(func, ast.Name):
+                    ad = func.id
+                elif isinstance(func, ast.Attribute):
+                    ad = func.attr
+                if ad and ad in self.KOD_YASAKLI:
+                    return False, "yasaklı çağrı: %s" % ad
+        return True, ""
+
+    def kod_duzenle(self, dosya, icerik):
+        """Organizma kendi .py dosyasını AST-güvenli şekilde yeniden yazar.
+
+        Korumalar:
+          * Cooldown: 60 sn'de en fazla bir kod değişikliği.
+          * Derleme kontrolü: py_compile ile import edilebilirlik doğrulanır.
+          * Otomatik geri alma: derlenmezse .yedek_kod'dan eski dosya geri yüklenir.
+          * Değişiklik geçmişi: her deneme kod_degisiklik_gecmisi'ye kaydedilir.
+        """
+        simdi = time.time()
+
+        # 1) Cooldown
+        if simdi - self.son_kod_duzenle_zamani < self.kod_duzenle_cooldown_sn:
+            kalan = int(self.kod_duzenle_cooldown_sn - (simdi - self.son_kod_duzenle_zamani))
+            self.kod_degisiklik_gecmisi.append({"dosya": dosya, "zaman": simdi, "basarili": False, "mesaj": "cooldown: %d sn bekle" % kalan})
+            return False, "cooldown: %d sn bekle" % kalan
+
+        kök = Path(__file__).resolve().parent.parent
+        hedef = (kök / dosya).resolve()
+        try:
+            hedef.relative_to(kök.resolve())
+        except ValueError:
+            return False, "yol dışı: %s" % dosya
+        if not str(hedef).endswith(".py"):
+            return False, "sadece .py: %s" % dosya
+        if not hedef.exists():
+            return False, "yok: %s" % dosya
+
+        ok, neden = self._ast_guvenli_mi(icerik)
+        if not ok:
+            self.kod_degisiklik_gecmisi.append({"dosya": dosya, "zaman": simdi, "basarili": False, "mesaj": neden})
+            return False, neden
+
+        try:
+            onceki_icerik = hedef.read_text(encoding="utf-8")
+        except OSError as e:
+            return False, "okuma hatası: %s" % e
+
+        onceki_bayt = len(onceki_icerik.encode("utf-8"))
+        yeni_bayt = len(icerik.encode("utf-8"))
+
+        # 2) Yedek
+        yedek_kok = kök / ".yedek_kod"
+        yedek_kok.mkdir(parents=True, exist_ok=True)
+        yedek_ad = yedek_kok / dosya.replace("/", "_")
+        try:
+            yedek_ad.write_text(onceki_icerik, encoding="utf-8")
+        except OSError as e:
+            return False, "yedek hatası: %s" % e
+
+        # 3) Atomik yazım
+        tmp = hedef.with_suffix(".py.tmp")
+        try:
+            tmp.write_text(icerik, encoding="utf-8")
+            tmp.replace(hedef)
+        except OSError as e:
+            return False, "yazım hatası: %s" % e
+
+        # 4) Derleme kontrolü
+        try:
+            py_compile.compile(str(hedef), doraise=True)
+        except py_compile.PyCompileError as e:
+            # 5) Geri alma
+            try:
+                geri = yedek_ad.read_text(encoding="utf-8")
+                tmp2 = hedef.with_suffix(".py.tmp2")
+                tmp2.write_text(geri, encoding="utf-8")
+                tmp2.replace(hedef)
+            except OSError:
+                pass
+            self.kod_degisiklik_gecmisi.append({"dosya": dosya, "zaman": simdi, "basarili": False, "onceki_bayt": onceki_bayt, "yeni_bayt": yeni_bayt, "mesaj": "derleme hatasi, geri yuklendi: %s" % str(e)[:120]})
+            self.journal.log("kod_duzenle_gerialindi", dosya=dosya, onceki_bayt=onceki_bayt, yeni_bayt=yeni_bayt, hata=str(e)[:200])
+            return False, "derleme hatasi, eski kod geri yuklendi: %s" % str(e)[:120]
+
+        # 6) Başarılı
+        self.son_kod_duzenle_zamani = simdi
+        self.kod_degisiklik_gecmisi.append({"dosya": dosya, "zaman": simdi, "basarili": True, "onceki_bayt": onceki_bayt, "yeni_bayt": yeni_bayt, "mesaj": "basarili"})
+        if len(self.kod_degisiklik_gecmisi) > 200:
+            self.kod_degisiklik_gecmisi = self.kod_degisiklik_gecmisi[-200:]
+        self.journal.log("kod_duzenle", dosya=dosya, onceki_bayt=onceki_bayt, yeni_bayt=yeni_bayt, bayt=yeni_bayt)
+        return True, "düzenlendi ve derlendi: %s (%d bayt)" % (dosya, yeni_bayt)
 
     # ---------- Sahne 2: araç-kompozisyonu ----------
 

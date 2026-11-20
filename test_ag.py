@@ -34,6 +34,11 @@ sys.path.insert(0, "/home/emrah/Genel/core")
 os.environ["GOLGE_LOG"] = ""   # kapı günlüğü testlerde kapalı (kirlilik yok)
 import kullan as K
 
+
+def komut_eylemleri(k):
+    return {a for a in k.eylemler() if a.startswith("cmd:")}
+
+
 # ---- canlı yakalama fixture'ları (2026-10-15, gerçek çıktılar) ----
 NMAP_CANLI = """Starting Nmap 7.97SVN ( https://nmap.org ) at 2026-10-15 15:11 +0300
 Nmap scan report for 192.168.1.1
@@ -205,9 +210,9 @@ print("6 yargı: nmap/ping/ip × canlı/ölü/kanıt-yok + kapsam dışı OK")
 # 7) maske tek kaynaktan + _hedef_kur AG_TARA üretir
 k = yeni_kullan()
 k.hedef = {"tip": "AG_TARA", "ip": "192.168.1.1", "komsu_var": True}
-assert set(k.eylemler()) == {"cmd:nmap", "cmd:ping", "cmd:ip", "cmd:traceroute"}, k.eylemler()
+assert komut_eylemleri(k) == {"cmd:nmap", "cmd:ping", "cmd:ip", "cmd:traceroute"}, k.eylemler()
 k.hedef = dict(k.hedef, komsu_var=False)
-assert set(k.eylemler()) == {"cmd:nmap", "cmd:ping", "cmd:traceroute"}, k.eylemler()
+assert komut_eylemleri(k) == {"cmd:nmap", "cmd:ping", "cmd:traceroute"}, k.eylemler()
 # telafi: diğer tüm kurucular None dönerse AG_TARA sıradaki hedef
 k = yeni_kullan()
 for ad in ("_h_dosya_bul", "_h_paket_sor", "_h_dizin_liste", "_h_dosya_oku",
@@ -301,7 +306,7 @@ assert hm["nmap"][-1] == "127.0.0.1"         # döngü; dış IP asla yok
 assert hm["ss"][:3] == ["ss", "-Htan", "state"]
 assert hm["curl"][-1].startswith("http://127.0.0.1:")
 k.hedef = hb
-assert set(k.eylemler()) == {"cmd:nmap", "cmd:ss", "cmd:curl", "cmd:traceroute"}, k.eylemler()
+assert komut_eylemleri(k) == {"cmd:nmap", "cmd:ss", "cmd:curl", "cmd:traceroute"}, k.eylemler()
 # ben_http_port=0 → curl kapısı YOK (maske tek kaynaktan; temp kök:
 # _ag_kapali her çağrıda kapsamı dosyadan tazeler → monkeypatch boştur)
 bos2 = tempfile.mkdtemp(prefix="ag_kapsam_")

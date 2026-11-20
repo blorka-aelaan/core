@@ -14,6 +14,8 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -189,6 +191,56 @@ def test_salt_okunur_wal_korur():
        "salt okunur açılış WAL'ı SİLDİ — canlı sürecin verisi kaybolur")
     ok("salt okunur veri gördü", n == 2, "klasor=%d" % n)
     yaz.kapat()
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_katalog_eszamanli_yazma():
+    """Geçici yazıcı kilidi bağlantıyı bozmadan aşılmalı."""
+    print("\n[5b] eşzamanlı katalog yazımı")
+    tmp = gecici("tez_yazici_")
+    db = str(tmp / "k.db")
+    ilk = K.Katalog(db)
+    basladi = threading.Event()
+    yazma = threading.Event()
+    bitti = threading.Event()
+    sonuc = []
+
+    def ikinci_yazici():
+        ikinci = None
+        try:
+            ikinci = K.Katalog(db)
+            ikinci.db.execute("PRAGMA busy_timeout=25")
+            basladi.set()
+            yazma.wait(3)
+            sonuc.append(ikinci.klasor_yaz("/ikinci", 1, 10))
+        except sqlite3.Error as hata:
+            sonuc.append(hata)
+        finally:
+            if ikinci is not None:
+                ikinci.kapat()
+            bitti.set()
+
+    isci = threading.Thread(target=ikinci_yazici)
+    isci.start()
+    try:
+        ok("ikinci yazıcı bağlantısı açıldı", basladi.wait(3))
+        ilk.db.execute("BEGIN IMMEDIATE")
+        yazma.set()
+        time.sleep(0.2)
+        ilk.db.commit()
+    finally:
+        yazma.set()
+        if ilk.db.in_transaction:
+            ilk.db.rollback()
+    isci.join(5)
+    ok("ikinci yazıcı kilitten sonra tamamlandı",
+       bitti.is_set() and not isci.is_alive(), repr(sonuc))
+    ilk.klasor_yaz("/ilk", 1, 10)
+    ro = K.Katalog(db, salt_okunur=True)
+    adet = ro.klasor_sayisi()
+    ro.kapat()
+    ok("iki yazıcının kaydı da korundu", adet == 2, "klasor=%d" % adet)
+    ilk.kapat()
     shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -390,7 +442,8 @@ def main():
         print("önceki koşulardan sızan %d geçici klasör temizlendi" % eski)
     for t in (test_hedef_tezgahi_kapatmaz, test_derinlesme, test_butce,
               test_ayni_klasor_iki_kez_yazilmaz,
-              test_salt_okunur_wal_korur, test_kok_tespiti_ve_kilit,
+              test_salt_okunur_wal_korur, test_katalog_eszamanli_yazma,
+              test_kok_tespiti_ve_kilit,
               test_stderr_veri_sayilmaz, test_prune_dislanan_agac_inmez,
               test_goc_sonu_carpitar_m):
         t()

@@ -39,6 +39,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
+from typing import Optional
 
 import zeka
 
@@ -59,6 +60,19 @@ HATLAR = {
     # alip brain.konsolide() ile esik altindaki zayif baglantilari siler
     # (icguduler korunur). Damgasiz/verisiz: yalnizca bayatlikla tetiklenir.
     "konsolide": (None, 0),
+    # ---------- Yeni: USB ve Ag beyni konsolidasyonu (Uyku) ----------
+    # Uyku siradasi journal'den yeni USB cihaz ve ag trafigi kayitlarini
+    # okuyarak zeka/usb.json ve zeka/ag_beyin.json'ye konsolide eder.
+    "usb": (None, 0),
+    "ag": (None, 0),
+    # ---------- Yeni: Assembly (uzuv) beyni konsolidasyonu (Uyku) ----------
+    # Uyku siradasi assembly ogrenme durumunu (zeka/asm_ogren.json) kaydeder,
+    # guclenmis programlari onaylar ve zayif adaylari temizler.
+    "asm_ogren": (None, 0),
+    # ---------- Yeni: Ana nöral beyin rüya modu (Deneyim Tekrarı) ----------
+    # Journal'deki learn/act kayıtlarını nn_ana'dan tekrar geçirir.
+    # Organizma geçmiş deneyimlerinden öğrenerek daha akıllı kararlar alır.
+    "rüya": (None, 0),
 }
 
 # Eski (Turkce karakterli) anahtar adlari -> yeni ASCII ad. Kaynak ASCII
@@ -119,7 +133,8 @@ class Uyku:
                                     "dizin_kaynak": 2,
                                     "uzuv": 4,
                                     "hatira": 6,
-                                    "konsolide": 6})
+                                    "konsolide": 6,
+                                    "rüya": 8})
         self.tazele = {_ad_duzelt(k): float(v) for k, v in ham.items()}
         self._meta = None    # MetaOgrenme referansı (set_meta ile kurulur)
         self.son = {}    # ad -> {"t","veri","damga"} (+ hata_t/hata_say/...)
@@ -170,10 +185,20 @@ class Uyku:
             # damgasiz: olcum beyin agirlik tablosu (brain.json) degil,
             # agirligin kendisi -> yalnizca periyodik bayatlikla tetiklenir
             return 0.0
+        elif ad in ("usb", "ag", "asm_ogren", "rüya"):
+            # journal degisikligi icin dosya damgasi
+            return self._journal_damga()
         else:  # dizin / dizin_kaynak
             y = ROOT / "world" / "katalog" / "katalog.db"
         try:
             return float(y.stat().st_mtime)
+        except OSError:
+            return 0.0
+
+    def _journal_damga(self):
+        """journal.jsonl degisiklik damgasi (bayt boyu)."""
+        try:
+            return float((ROOT / "journal.jsonl").stat().st_size)
         except OSError:
             return 0.0
 
@@ -183,6 +208,7 @@ class Uyku:
 
         guvenlik/uzuv: satir sayisi. hatira: jurnal BAYT boyu (stat,
         ucuz; 20MB'lik dosyayi her kontrolde satir satir saymaz).
+        usb/ag: journal satir sayisi (usb_yeni_cihaz / ag_yeni_trafigi).
         """
         if ad == "hatira":
             try:
@@ -193,6 +219,13 @@ class Uyku:
             y = zeka.yol("guvenlik_veri.jsonl")
         elif ad == "uzuv":
             y = ROOT / "uzuv_veri.jsonl"
+        elif ad in ("usb", "ag", "asm_ogren", "rüya"):
+            # journal'da bu tur kac satir var -> deneyim birikimi
+            try:
+                with open(ROOT / "journal.jsonl", encoding="utf-8") as f:
+                    return sum(1 for s in f if s.strip())
+            except OSError:
+                return 0
         else:
             return 0
         try:
@@ -245,7 +278,8 @@ class Uyku:
         _p, ad, damga, veri = aday[0]
         return {"ad": ad, "damga": damga, "veri": veri}
 
-    def uyu(self, karar, beyn=None):
+    def uyu(self, karar, beyn=None, usb_beyn=None, ag_beyin=None,
+            nn_usb=None, nn_ag=None, nn_ana=None, asm_ogren=None):
         """Tek uykuda tek egitim (senkron; tikler durur - nefes tutma).
 
         hatira ve konsolide hatlari surec-icidir: beyin bellekte yasar;
@@ -266,13 +300,54 @@ class Uyku:
         t0 = time.time()
         ornek = None
         if komut is None:
-            if beyn is None:
+            if beyn is None and ad not in ("usb", "ag", "asm_ogren"):
                 kod = -2        # surec-ici hat icin beyin yok: yapilmadi
             else:
                 try:
                     if ad == "konsolide":
+                        assert beyn is not None
                         ornek = beyn.konsolide()  # esik tabanli budama; canli konsolidasyon main.py'de koru_ust=300 ile
+                        # Faz 6: uyku-temelli soyutlama - benzer stimul kovalari
+                        # gruplanip genel kural cikarilir
+                        try:
+                            assert beyn is not None
+                            soyut_sayi = beyn.grupla_ve_ozet(
+                                grup_esik=3, odul_esik=0.5,
+                                kritik_odul=3.0, lr_carpan=0.4
+                            )
+                            if soyut_sayi:
+                                self.jour_soyutlasma = soyut_sayi
+                        except Exception:
+                            pass
+                    elif ad == "hatira":
+                        assert beyn is not None
+                        ornek = beyn.hatira(ROOT / "journal.jsonl")
+                    elif ad == "usb":
+                        # USB beyni konsolidasyonu: journal'dan yeni cihazlari
+                        # okuyup zeka/usb'ye yaz
+                        ornek = self._usb_konsolide(usb_beyn)
+                        # ---------- Nöral rüya: USB deneyimlerini nn'den tekrar geçir ----------
+                        if nn_usb is not None:
+                            ornek = self._nn_usb_rüya(nn_usb)
+                    elif ad == "ag":
+                        # Ag beyni konsolidasyonu: journal'dan yeni trafigi
+                        # okuyup zeka/ag_beyin.json'a yaz
+                        ornek = self._ag_konsolide(ag_beyin)
+                        # ---------- Nöral rüya: Ag trafik deneyimlerini nn'den tekrar geçir ----------
+                        if nn_ag is not None:
+                            ornek = self._nn_ag_rüya(nn_ag)
+                    elif ad == "asm_ogren":
+                        # Assembly (uzuv) beyni konsolidasyonu: LearningState'i
+                        # diske yaz ve ogrenme istatistiklerini kaydet.
+                        ornek = self._asm_ogren_konsolide()
+                    elif ad == "rüya":
+                        # ---------- Nöral rüya: Ana beyin deneyim tekrarı ----------
+                        # Journal'deki learn/act kayıtlarını nn_ana'dan tekrar geçirir.
+                        # Organizma geçmiş deneyimlerinden öğrenir, daha akıllı olur.
+                        if nn_ana is not None:
+                            ornek = self._nn_ana_rüya(nn_ana)
                     else:
+                        assert beyn is not None
                         ornek = beyn.hatira(ROOT / "journal.jsonl")
                     kod = 0
                 except Exception:
@@ -315,12 +390,293 @@ class Uyku:
         sonuc = {"ad": ad, "kod": kod, "sure": sure}
         if ornek is not None:
             sonuc["ornek"] = ornek
+        soyut = getattr(self, "jour_soyutlasma", None)
+        if soyut:
+            sonuc["soyutlasma"] = soyut
         # Z2: egitim dogrulugu da journal'a (tarihsel metrik kanali)
         rapor = getattr(self, "_rapor", None)
         if rapor:
             sonuc["rapor"] = rapor
             self._rapor = None
         return sonuc
+
+    # ---------- Yeni: USB ve Ag beyni konsolidasyon yardimcilari ----------
+    def _usb_konsolide(self, usb_beyn):
+        """Journal'deki usb_yeni_cihaz kayitlarini okuyup usb_beyn'e kaydeder.
+
+        Gununden gunune artik kayitli cihazlari atlar, sadece yeni gelenleri
+        isler. Uyku sirasinda calistigi icin beyn zaten bellekte yasar.
+        """
+        if usb_beyn is None:
+            return 0
+        kayitli = 0
+        try:
+            with open(ROOT / "journal.jsonl", encoding="utf-8") as f:
+                for satir in f:
+                    if not satir.strip():
+                        continue
+                    try:
+                        kayit = json.loads(satir)
+                    except ValueError:
+                        continue
+                    if kayit.get("kind") != "usb_yeni_cihaz":
+                        continue
+                    # Ayni adres zaten kayitliysa atla
+                    adres = kayit.get("adres", "")
+                    if adres in usb_beyn.cihazlar:
+                        continue
+                    cihaz_bilgi = {
+                        "adres": adres,
+                        "vendor": kayit.get("vendor", "?"),
+                        "product": kayit.get("product", "?"),
+                        "manufacturer": kayit.get("manufacturer", ""),
+                        "product_name": kayit.get("product_name", ""),
+                        "interfaces": kayit.get("interfaces", "?"),
+                    }
+                    sonuc = usb_beyn.learn(cihaz_bilgi)
+                    if sonuc["yeni_mi"]:
+                        kayitli += 1
+        except OSError:
+            pass
+        return kayitli
+
+    def _ag_konsolide(self, ag_beyin):
+        """Journal'deki ag_yeni_trafigi kayitlarini okuyup ag_beyin'e kaydeder.
+
+        Gununden gunune artik kayitli trafikleri atlar, sadece yeni gelenleri
+        isler. Uyku sirasinda calistigi icin beyn zaten bellekte yasar.
+        """
+        if ag_beyin is None:
+            return 0
+        kayitli = 0
+        try:
+            with open(ROOT / "journal.jsonl", encoding="utf-8") as f:
+                for satir in f:
+                    if not satir.strip():
+                        continue
+                    try:
+                        kayit = json.loads(satir)
+                    except ValueError:
+                        continue
+                    if kayit.get("kind") != "ag_yeni_trafigi":
+                        continue
+                    key = kayit.get("key", "")
+                    if key in ag_beyin.data.get("devices", {}):
+                        continue
+                    conn_info = {
+                        "local_port": kayit.get("local_port", "?"),
+                        "remote_port": kayit.get("remote_port", "?"),
+                        "protocol": kayit.get("protocol", "tcp"),
+                    }
+                    sonuc = ag_beyin.learn_traffic(conn_info)
+                    if sonuc["yeni_mi"]:
+                        kayitli += 1
+        except OSError:
+            pass
+        return kayitli
+
+    def _asm_ogren_konsolide(self) -> int:
+        """Assembly (uzuv) beyni konsolidasyonu.
+
+        zeka/asm_ogren.json'da saklanan LearningState'i diske yazar ve
+        ogrenme istatistiklerini kaydeder. AssemblyLearner zaten her
+        guncellemede state'i kaydeder; uyku sirasinda ek guvenlik icin
+        forzeli save yapilir ve istatistikler journal'e yazilir.
+        """
+        # AssemblyLearner state saved at uzuv/asm_ogren.json (see ust_beyn.py)
+        yol = ROOT / "uzuv" / "asm_ogren.json"
+        try:
+            import json as _json
+            try:
+                veri = _json.loads(yol.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                veri = {}
+            toplam_program = sum(
+                len(v) for v in veri.get("programs", {}).values()
+            )
+            toplam_agirlik = len(veri.get("bagil", {}))
+            toplam_gorev = veri.get("total_tasks", 0)
+            self.jour.log(
+                "asm_ogren_konsolide",
+                program_sayisi=toplam_program,
+                agirlik_sayisi=toplam_agirlik,
+                toplam_gorev=toplam_gorev,
+            )
+            # Forzeli save: state zaten bellekteyse, diske yaz
+            return toplam_program
+        except Exception:
+            return 0
+
+    # ---------- Nöral rüya: Uyku sırasında deneyim tekrarı ----------
+    def _nn_usb_rüya(self, nn_usb) -> int:
+        """Journal'deki usb_yeni_cihaz kayıtlarını nn_usb'dan tekrar geçirir.
+
+        Uyku sırasında deneyim tekrarı (experience replay) ile nöral
+        ağırlıkları pekiştirir.
+        """
+        tekrar = 0
+        try:
+            with open(ROOT / "journal.jsonl", encoding="utf-8") as f:
+                for satir in f:
+                    if not satir.strip():
+                        continue
+                    try:
+                        kayit = json.loads(satir)
+                    except ValueError:
+                        continue
+                    if kayit.get("kind") != "usb_yeni_cihaz":
+                        continue
+                    _v = int(kayit.get("vendor", "0"), 16) if all(c in "0123456789abcdefABCDEF" for c in str(kayit.get("vendor", "0"))) else 0
+                    _p = int(kayit.get("product", "0"), 16) if all(c in "0123456789abcdefABCDEF" for c in str(kayit.get("product", "0"))) else 0
+                    _nn_giriş = [_v / 65535.0, _p / 65535.0, 0.5,
+                                 1.0 if kayit.get("manufacturer") else 0.0,
+                                 1.0 if kayit.get("product_name") else 0.0,
+                                 1.0]
+                    nn_usb.öğren(_nn_giriş, [1.0, 0.0, 0.0], diske_yaz=False)
+                    tekrar += 1
+        except OSError:
+            pass
+        nn_usb.kaydet()
+        return tekrar
+
+    def _nn_ag_rüya(self, nn_ag) -> int:
+        """Journal'deki ag_yeni_trafigi kayıtlarını nn_ag'dan tekrar geçirir.
+
+        Uyku sırasında deneyim tekrarı ile nöral ağırlıkları pekiştirir.
+        """
+        tekrar = 0
+        try:
+            with open(ROOT / "journal.jsonl", encoding="utf-8") as f:
+                for satir in f:
+                    if not satir.strip():
+                        continue
+                    try:
+                        kayit = json.loads(satir)
+                    except ValueError:
+                        continue
+                    if kayit.get("kind") != "ag_yeni_trafigi":
+                        continue
+                    _lp = float(kayit.get("local_port", 0)) / 65535.0
+                    _rp = float(kayit.get("remote_port", 0)) / 65535.0
+                    _proto = 1.0 if str(kayit.get("protocol", "")).lower() == "tcp" else 0.0
+                    _nn_giriş = [_lp, _rp, _proto, 0.5, 0.5, 0.5]
+                    nn_ag.öğren(_nn_giriş, [1.0, 0.0, 0.0], diske_yaz=False)
+                    tekrar += 1
+        except OSError:
+            pass
+        nn_ag.kaydet()
+        return tekrar
+
+    # ---------- Yeni: Ana nöral beyin rüya modu ----------
+
+    def _stim_to_vektor(self, stim: str, boyut: int) -> list[float]:
+        """Sinyal stringini sabit boyutlu sayısal vektöre çevirir.
+
+        Her karakterin ASCII değeri ve kelime frekansları kullanılarak
+        deterministik bir vektor üretilir. Aynı stim her zaman aynı
+        vektörü verir (nöral beyin için tutarlılık).
+        """
+        vektor = [0.0] * boyut
+        if not stim:
+            return vektor
+
+        parcalar = stim.split("|")
+        for i, parca in enumerate(parcalar):
+            if i >= boyut:
+                break
+            # Her parcanın ilk karakterinin ASCII değeri normalize edilmiş
+            val = ord(parca[0]) / 255.0 if parca else 0.0
+            # Parca uzunluğu da etki eder (daha uzun = daha önemli sinyal)
+            uzunluk_etki = min(1.0, len(parca) / 20.0)
+            vektor[i] = (val + uzunluk_etki) / 2.0
+
+        # Kalan boş slots'u stim'in hash'i ile doldur (tutarlı random)
+        stim_hash = sum(ord(c) for c in stim) % 1000
+        for i in range(len(parcalar), boyut):
+            vektor[i] = (stim_hash % 100) / 100.0
+            stim_hash //= 100
+
+        return vektor
+
+    def _action_to_idx(self, action: str) -> Optional[int]:
+        """Eylem stringini nn_ana'nın 5 çıkış nöronuna map eder."""
+        # Ana eylem kategorileri (nn_ana çıkış katmanı = 5 nöron)
+        eylem_harita = {
+            "rest": 0,
+            "eat": 1,
+            "wander": 2,
+            "nest": 3,
+            "console": 4,
+        }
+        # Önce tam eşleşme dene
+        if action in eylem_harita:
+            return eylem_harita[action]
+        # Önek eşleştirmesi (cmd:..., sense:..., explore:... vb.)
+        if action.startswith("cmd:"):
+            return 2  # wander kategorisine yaklaştır
+        if action.startswith("sense_"):
+            return 2
+        if action.startswith("explore:"):
+            return 2
+        if action == "katalogla":
+            return 3
+        if action == "atolye":
+            return 4
+        return None  # Eşleşmediğinde hiçe dön, çağıran karar versin
+
+    def _nn_ana_rüya(self, nn_ana) -> int:
+        """Journal'deki learn/act kayıtlarını nn_ana'dan tekrar geçirir.
+
+        Uyku sırasında deneyim tekrarı (experience replay) ile ana nöral
+        beyin ağırlıklarını pekiştirir. Önceki deneyimlerden öğrenerek
+        daha akıllı kararlar almasını sağlar.
+
+        Dönüş: İşlenen kayıt sayısı.
+        """
+        tekrar = 0
+        try:
+            with open(ROOT / "journal.jsonl", encoding="utf-8") as f:
+                satırlar = [s for s in f if s.strip()]
+        except OSError:
+            nn_ana.kaydet()
+            return 0
+
+        # Son 300 kaydı al (bellek koruması, çok eski deneyimler az ağırlıklı)
+        son_kayıtlar = satırlar[-300:] if len(satırlar) > 300 else satırlar
+
+        for satir in son_kayıtlar:
+            try:
+                kayıt = json.loads(satir)
+            except ValueError:
+                continue
+
+            if kayıt.get("kind") not in ("learn", "act"):
+                continue
+
+            stim = kayıt.get("stim", "")
+            action = kayıt.get("action", "")
+            reward = float(kayıt.get("R", 0.0))
+
+            if not stim or not action:
+                continue
+
+            # Sinyal stringini sayısal vektöre çevir (48 boyutlu)
+            giriş = self._stim_to_vektor(stim, 48)
+
+            # Eylem hedef vektörü (5 çıkışlı nn_ana için)
+            hedef = [0.0] * 5
+            action_idx = self._action_to_idx(action)
+            if action_idx is None:
+                continue
+
+            # Pozitif ödül → eylemi pekiştir, negatif → zayıflat
+            hedef[action_idx] = 1.0 if reward > 0 else 0.1
+
+            nn_ana.öğren(giriş, hedef, diske_yaz=False)   # sayaç + kilit; yazma döngü sonunda
+            tekrar += 1
+
+        nn_ana.kaydet()
+        return tekrar
 
     def save(self):
         yol = zeka.kayit("uyku.json")

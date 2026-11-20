@@ -38,6 +38,8 @@ bu yeni değerleri `update_dynamic_params` üzerinden kullanır.
 
 from collections import deque
 
+from hata_katalogu import HataTuru
+
 
 class MetaOgrenme:
     """Ödül trendi ve iç bağlama göre lr/epsilon'ı kendisi Tayin eder."""
@@ -286,6 +288,68 @@ class MetaOgrenme:
         mem["basari"] = 0.9 * mem["basari"] + 0.1 * trend
         mem["lr_carpan"] = brain.meta_lr_carpan
         mem["eps_carpan"] = brain.meta_eps_carpan
+
+    # -------------------------------------------------------------- hata akışı
+    def hata_kaydi(self, tur: HataTuru, odul: float, guven: float, tik: int) -> None:
+        """Bir hata kaydı alır ve hiperparametreleri ona göre ayarlar.
+
+        Hata türüne göre farklı tepkiler:
+          * TEKRAR_BASARISIZLIK → epsilon artar (keşfe yönel), lr düşer
+          * GUVEN_ZAFIYETI      → lr düşer (daha temkinli öğrenme)
+          * DUSUK_ODUL          → epsilon artar (mevcut yol çalışmıyor)
+          * YANLIS_KOMUT        → lr düşer (yanlış kalıbı pekileştirme)
+          * YANLIS_BAGLAM       → lr normal, epsilon artar (bağlamı anlamıyor)
+        """
+        if not hasattr(self, "_hata_gecmisi"):
+            self._hata_gecmisi = []
+        self._hata_gecmisi.append({
+            "tur": tur,
+            "odul": odul,
+            "guven": guven,
+            "tik": tik,
+        })
+        if len(self._hata_gecmisi) > 100:
+            self._hata_gecmisi = self._hata_gecmisi[-100:]
+
+        son_hatalar = self._hata_gecmisi[-20:] if self._hata_gecmisi else []
+        if not son_hatalar:
+            return
+
+        n = len(son_hatalar)
+        tekrar_oran = sum(1 for h in son_hatalar
+                          if h["tur"] == HataTuru.TEKRAR_BASARISIZLIK) / n
+        guven_zafiyeti_oran = sum(1 for h in son_hatalar
+                                  if h["tur"] == HataTuru.GUVEN_ZAFIYETI) / n
+        dusuk_odul_oran = sum(1 for h in son_hatalar
+                              if h["tur"] == HataTuru.DUSUK_ODUL) / n
+        yanlis_komut_oran = sum(1 for h in son_hatalar
+                                if h["tur"] == HataTuru.YANLIS_KOMUT) / n
+        yanlis_baglam_oran = sum(1 for h in son_hatalar
+                                 if h["tur"] == HataTuru.YANLIS_BAGLAM) / n
+
+        if tekrar_oran > 0.30:
+            self.brain.meta_eps_carpan = max(0.25, min(4.0,
+                self.brain.meta_eps_carpan * 1.15))
+            self.brain.meta_lr_carpan = max(0.25, min(4.0,
+                self.brain.meta_lr_carpan * 0.90))
+
+        if guven_zafiyeti_oran > 0.30:
+            self.brain.meta_lr_carpan = max(0.25, min(4.0,
+                self.brain.meta_lr_carpan * 0.90))
+
+        if dusuk_odul_oran > 0.30:
+            self.brain.meta_eps_carpan = max(0.25, min(4.0,
+                self.brain.meta_eps_carpan * 1.10))
+
+        if yanlis_komut_oran > 0.30:
+            # Yanlış komut kalıbı pekiştirilme: öğrenmeyi daha temkinli tut.
+            self.brain.meta_lr_carpan = max(0.25, min(4.0,
+                self.brain.meta_lr_carpan * 0.85))
+
+        if yanlis_baglam_oran > 0.30:
+            # Bağlam yakalanamıyor: lr'yi bırak, keşfi artar.
+            self.brain.meta_eps_carpan = max(0.25, min(4.0,
+                self.brain.meta_eps_carpan * 1.10))
 
     # -------------------------------------------------------------- sorgular
     def durum(self):

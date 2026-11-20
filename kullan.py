@@ -211,7 +211,7 @@ class Kullan:
         # yok); canlıda varsayılan golge_log.jsonl (çevrimdışı incele/rapor
         # kanıtı — main.py kullan_engel kayıtlarıyla eşleşir).
         _glog = os.environ.get("GOLGE_LOG", str(golge.LOG))
-        self._kapi = golge.Kapi(log=(_glog or None), zaman_asimi=ZAMAN_ASIMI)
+        self._kapi = golge.Kapi(log=(_glog or None), zaman_asimi=ZAMAN_ASIMI) # type: ignore
         self._son_kap = None   # en son kapı sonucu (uygula() engel okur)
         # AG_TARA (Faz 0): kapsam kilidi canlı izlenir (dosya değişince
         # anında geçerli — restart gerekmez) + soğuma + az-denenmiş öncelik
@@ -228,6 +228,11 @@ class Kullan:
         self._komut_tehlike.load()
         self._komut_tehlike_esik = 0.80   # bu üzeri komut engellenir
         self._komut_tehlike_ceza_esik = 0.50  # bu üzeri ceza verilir (ama çalıştırılır)
+        # Hedef+komut maskeleme: aynı (tip, komut) 3 kez başarısız olursa
+        # MASKE_SURE saniye boyunca yeniden denenmez.
+        self._maske = {}          # (hedef_tip, komut) -> expiry timestamp
+        self.MASKE_SURE = 30.0    # saniye
+        self.komut_ciktilari = {}  # hedef|komut -> gözlenen çıktı ve doğrulama
         _jour_yol = cfg.get("stage", {}).get("journal", "journal.jsonl")
         self.jour = Journal(ROOT / _jour_yol, quiet=False)
 
@@ -406,12 +411,12 @@ class Kullan:
                     son_veri = tum[-128 * 1024:]
                 except (OSError, EOFError):
                     continue
-            if b"\x00" in bas_veri or b"\x00" in son_veri:
+            if b"\x00" in bas_veri or b"\x00" in son_veri: # type: ignore
                 continue
             kosul = lambda s: 6 <= len(s.strip()) <= 120 and \
                 re.search(r"[A-Za-z0-9]", s)
-            bas_sat = bas_veri.decode("utf-8", "replace").splitlines()
-            son_sat = son_veri.decode("utf-8", "replace").splitlines()
+            bas_sat = bas_veri.decode("utf-8", "replace").splitlines() # type: ignore
+            son_sat = son_veri.decode("utf-8", "replace").splitlines() # type: ignore
             # ornek_bas/ornek_son: head/tail bu satırları ÇIKTIYA
             # basınca "dosyayı gerçekten okudu" nesnel kanıtlanır
             # (wc sayı kanıtı verir; üçü de aynı gerçeğin kapısı).
@@ -456,6 +461,11 @@ class Kullan:
         /usr/sbin'den çalıştırılabilirleri tarar, kara listedekileri
         çıkarır. Bu sayede organizma binlerce komutu keşfedebilir;
         zararlı olanları komut_tehlike modeli engeller/cezalandırır.
+
+        ÖNCELİK SIRASI:
+          1) Öğrenilmiş komutlar (help_aciklamalar'da olan) — önce sunulur,
+             beyin bunları kullanmayı öğrenir.
+          2) Öğrenilmemişler — keşfedilmek için kalır.
         """
         if not self.aktif:
             return []
@@ -463,10 +473,20 @@ class Kullan:
         if h:
             harita = self._harita(h)
             if harita:
-                return ["cmd:" + c for c in harita]
+                help_actions = [
+                    "help:" + c for c in harita
+                    if c not in self._komut_tehlike.help_aciklamalar
+                ]
+                return help_actions + ["cmd:" + c for c in harita]
         # Hedef yok veya harita yok: sistemdeki tüm çalıştırılabilirler
         komutlar = self._sistem_komutlarini_tara()
-        return ["cmd:" + c for c in komutlar]
+        learned = [c for c in komutlar
+                   if c in self._komut_tehlike.help_aciklamalar]
+        ogrenilmemis = [c for c in komutlar
+                        if c not in self._komut_tehlike.help_aciklamalar]
+        # Öğrenilmişler önce, ardından öğrenilmemişler.
+        return ["cmd:" + c for c in learned] + \
+               ["cmd:" + c for c in ogrenilmemis]
 
     def _sistem_komutlarini_tara(self):
         """/bin, /usr/bin, /sbin, /usr/sbin'den çalıştırılabilirleri topla.
@@ -1121,6 +1141,18 @@ class Kullan:
 
     # ---------- uygulama + nesnel ödül ----------
 
+    def _maskeli_mi(self, hedef_tip, komut):
+        """(hedef_tip, komut) çifti şu an maskeleyici mi? Süresi dolmuşları temizler."""
+        anahtar = (hedef_tip, komut)
+        simdi = time.time()
+        bitis = self._maske.get(anahtar)
+        if bitis is None:
+            return False
+        if simdi >= bitis:
+            del self._maske[anahtar]
+            return False
+        return True
+
     def uygula(self, eylem):
         komut = eylem.split(":", 1)[-1]
 
@@ -1128,6 +1160,7 @@ class Kullan:
         # eylem = "help:ls" → komut = "ls" ama eylem prefix'i "help:" olur
         if eylem.startswith("help:"):
             help_komut = komut
+            hedef_tip = (self.hedef or {}).get("tip")
             onceki = help_komut in self._komut_tehlike.help_aciklamalar
             basarili, aciklama = self._komut_tehlike.help_ogren(help_komut)
             if basarili:
@@ -1142,21 +1175,21 @@ class Kullan:
                 _tip = self._komut_tehlike.help_aciklamalar[
                     help_komut].get("tip", "READ")
                 return {"obs": obs, "gain": _gain, "cost": MALIYET,
-                        "kind": "act", "dogru": True,
+                        "kind": "act", "dogru": None, "help_ok": True,
                         "argv": [help_komut, "--help"],
                         "komut_tehlike": 0.0,
                         "komut_ceza": False,
                         "komut_aciklama": aciklama,
-                        "komut_tip": _tip}
+                        "komut_tip": _tip, "hedef_tip": hedef_tip}
             else:
                 obs = "help:%s -> hata: %s" % (help_komut, aciklama)
                 self.jour.log("komut_help_hata", komut=help_komut,
                               hata=aciklama)
                 return {"obs": obs, "gain": 0.0, "cost": MALIYET,
-                        "kind": "act", "dogru": False,
+                        "kind": "act", "dogru": None, "help_ok": False,
                         "argv": [help_komut, "--help"],
-                        "komut_tehlike": 0.1,
-                        "komut_ceza": False}
+                        "komut_tehlike": 0.1, "komut_ceza": False,
+                        "hedef_tip": hedef_tip}
 
         # ---- Komut tehlike skoru (kendi kendini geliştiren sistem) ----
         # Komutu çalıştırmadan önce modeli sor: "bu komut tehlikeli mi?"
@@ -1187,8 +1220,28 @@ class Kullan:
             self.don()
         if not self.hedef:
             return {"obs": "hedef kurulamadı", "gain": 0.0,
-                    "cost": MALIYET, "kind": "act", "dogru": False}
+                    "cost": MALIYET, "kind": "act", "dogru": False,
+                    "dogrulanmis": False}
+        hedef_tip = self.hedef["tip"]
+        # --- Maske kontrolü: bu hedef+komut 3 kez başarısız olduysa
+        # MASKE_SURE saniye boyunca çalıştırılmaz. ---
+        if self._maskeli_mi(hedef_tip, komut):
+            return {"obs": "hedef+komut maskeli",
+                    "gain": 0.0, "cost": MALIYET, "kind": "act",
+                    "dogru": False, "argv": argv,
+                    "dogrulanmis": False, "hedef_tip": hedef_tip,
+                    "calisti": False, "maskeli": True}
         argv = self._argv_kur(komut)
+        # Komut mevcut hedef için haritada yoksa → ["true"] fallback;
+        # bu komutu çalıştırmak deneme bütçesini boşa harcar ve
+        # "3'te takıldı / ölü kapı" uyarısı üretir. Eşleşme yoksa
+        # deneme sayacı artırmadan başarısız dön.
+        if argv == ["true"] and komut != "true":
+            return {"obs": "komut hedefle eşleşmiyor",
+                    "gain": 0.0, "cost": MALIYET, "kind": "act",
+                    "dogru": False, "argv": argv,
+                    "dogrulanmis": False, "hedef_tip": hedef_tip,
+                    "calisti": False}
         # komut bütçesi: BENI_TARA'nın -sV probe'ları ölçüldü ~14s
         # sürüyor (smb 139/445 + cevapsız soket) → bu tipe özel süre;
         # diğer tipler küresel ZAMAN_ASIMI'nda kalır
@@ -1203,7 +1256,7 @@ class Kullan:
             # tamponu korunur), yargıç çalışmaz (çıktı yok → sahte ödül
             # yok). engel → sert ceza (KAPI_CEZA); atlandi → ölç, ceza
             # verme (golge doktrini: atla = mod kararı, ihlal değil).
-            tip = self.hedef["tip"]
+            tip = hedef_tip
             deneme = self.hedef_deneme + 1
             self.denemeler += 1
             self.hedef_deneme = deneme
@@ -1218,13 +1271,27 @@ class Kullan:
             return {"obs": obs, "gain": gain, "cost": MALIYET,
                     "kind": "act", "dogru": False, "argv": argv,
                     "deneme": deneme, "duraklama": duraklama,
-                    "engel": engel}
+                    "engel": engel, "dogrulanmis": False,
+                    "hedef_tip": tip, "calisti": False}
         # ara bellek: bu adımın ÇIKTISI bir sonraki adımın girdisi olur
         # (wc/head dosyasız → stdin); TTL = hedef döngüsü (don'da sıfır)
         # tampon_dolu: ilerleme ödülü yalnızca İLK veri üretimine (gating)
         tampon_dolu = bool(self.ara.strip())
         self.ara = (cikti or "")[:ARA_TAVAN]
         dogru = self._dogrula(cikti, argv)
+        ilerleme = False
+        # Keep the observed outcome attached to the task-command pair.
+        self._komut_tehlike.komut_ciktilari[
+            "%s|%s" % (hedef_tip, komut)
+        ] = {
+            "komut": komut,
+            "hedef": hedef_tip,
+            "obs": cikti or "",
+            "kind": "cmd",
+            "dogru": dogru,
+            "deneme": self.denemeler,
+            "t": time.time(),
+        }
         self.denemeler += 1
         self.hedef_deneme += 1
         if dogru:
@@ -1233,7 +1300,7 @@ class Kullan:
         else:
             self.yanlislar += 1
             gain, bas = 0.0, "karşılamadı"
-            if (self.hedef["tip"] in ZINCIR_TIPLERI
+            if (hedef_tip in ZINCIR_TIPLERI
                     and cikti.strip() and argv[0] != "wc"):
                 # ilerleme sinyali (Aşama 2): zincirde SAYMA adımı dışındaki
                 # (veri üreten: ps/pgrep/find/ls/head) her dolu çıktı bir ara
@@ -1252,8 +1319,9 @@ class Kullan:
                     gain, bas = 0.0, "ara bellek zaten dolu"
                 else:
                     gain, bas = ILERLEME, "ara veri üretti"
+                    ilerleme = True
         obs = "%s (%s): $ %s → %s" % (
-            bas, self.hedef["tip"], " ".join(argv),
+            bas, hedef_tip, " ".join(argv),
             ozet(cikti or hata))
         # hedef başına deneme sınırı: eski küresel %3 sayacı hedefi
         # yanlış anda tazeliyordu; sayaç artık hedefe bağlı → deneme
@@ -1264,19 +1332,43 @@ class Kullan:
         # main bunu kullan_duraklama olarak jurnale döker (çevrimdışı
         # yeniden eğitimin hammaddesi: ölü kapı / ölçüm gürültüsü)
         duraklama = (not dogru and deneme >= 3)
+        gorev_sonucu = (
+            "basarili" if dogru else
+            "basarisiz" if duraklama else
+            "ilerleme" if ilerleme else
+            "deneme"
+        )
         if dogru or self.hedef_deneme >= 3:
+            if not dogru and deneme >= 3:
+                # 3 kez başarısız → bu (hedef, komut) çiftini K süreyle maskele
+                self._maske[(hedef_tip, komut)] = time.time() + self.MASKE_SURE
+                self.jour.log("hedef_maskeli", hedef=hedef_tip, komut=komut,
+                              sure=self.MASKE_SURE,
+                              deneme=deneme)
             self.don()
         # Orta/yüksek tehlikeliyse ceza uygula (organizma öğrenmeli:
         # komutu çalıştırınca enerji kaybı yaşar, ama engellenmez)
         if _komut_tehlike_ceza:
             gain = max(gain + _ceza_miktari, -20.0)
             obs = "%s [tehlikeli komut cezası: %.2f]" % (obs, _skor)
+
+        # Öğrenilmiş komut kullanımı bonusu (komutu ne işe yaradığını
+        # bilerek kullanmak → küçük pozitif ödül)
+        if komut in self._komut_tehlike.help_aciklamalar:
+            gain += 0.5
+            if bas:
+                obs = "%s [öğrenilen komut]" % obs
+            else:
+                obs = "%s [öğrenilen komut]" % obs
         return {"obs": obs, "gain": gain, "cost": MALIYET,
                 "kind": "act", "dogru": dogru, "argv": argv,
+                "dogrulanmis": True,
                 "deneme": deneme, "duraklama": duraklama,
+                "ilerleme": ilerleme, "gorev_sonucu": gorev_sonucu,
                 "komut_tehlike": _skor,
                 "komut_ceza": _komut_tehlike_ceza,
-                "komut_tip": komut_tehlike_mod._komut_tipi(komut)}
+                "komut_tip": komut_tehlike_mod._komut_tipi(komut),
+                "hedef_tip": hedef_tip, "calisti": True}
 
     # ---------- komut tehlike profili yardımcıları ----------
 
@@ -1348,7 +1440,7 @@ class Kullan:
         if tip == "DIZIN_LISTE":
             d = h["dizin"]
             return {"ls": ["ls", d],
-                    "find": ["find", d, "-maxdepth", "1"],
+                    "find": ["find", d],                    # sınırsız derinlik: tüm alt klasörlere iner
                     "dpkg": ["dpkg", "-S", d],
                     "tree": ["tree", d]}
         if tip == "DOSYA_OKU":
@@ -1835,7 +1927,7 @@ class Kullan:
                         return False
                     try:
                         a, b = (int(x) for x in
-                                argv[argv.index("-p") + 1].split("-", 1))
+                                argv[argv.index("-p") + 1].split("-", 1)) # type: ignore
                     except (ValueError, IndexError):
                         return False
                     return not any(a <= p <= b for p in gercek)

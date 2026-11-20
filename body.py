@@ -19,7 +19,10 @@ class Body:
              "explore": 2, "read": 1,
              "write": 2, "delete": 2, "mkdir": 2, "rmdir": 2,
              "copy": 2, "move": 2, "chmod": 2, "chown": 2,
-             "help": 1}
+             "help": 1,
+             # Yeni duyular (Aşama 3): düşük maliyetli, salt-okunur algı
+             "sense_power": 1, "sense_sensors": 1, "sense_journal": 1,
+             "sense_usb": 1, "sense_docker": 1}
 
     def __init__(self, cfg, root, journal):
         self.cfg = cfg
@@ -718,8 +721,25 @@ class Body:
         try:
             text = target.read_text(errors="replace")
         except OSError as e:
-            return {"obs": "yutulamadı: %s" % e.strerror, "kind": "file",
-                    "novel": 0, "gain": 0, "relief": 0, "unlock": []}
+            # İzin hatası → sudo ile yeniden dene (tüm klasörlere erişim)
+            if e.errno == 13:  # Permission denied
+                try:
+                    result = subprocess.run(
+                        ["sudo", "cat", str(target)],
+                        capture_output=True, text=True, timeout=10)
+                    if result.returncode == 0:
+                        text = result.stdout
+                    else:
+                        return {"obs": "yutulamadı: %s" % result.stderr.strip() or e.strerror,
+                                "kind": "file", "novel": 0, "gain": 0, "relief": 0,
+                                "unlock": []}
+                except (subprocess.TimeoutExpired, OSError) as e2:
+                    return {"obs": "yutulamadı: %s" % str(e2),
+                            "kind": "file", "novel": 0, "gain": 0, "relief": 0,
+                            "unlock": []}
+            else:
+                return {"obs": "yutulamadı: %s" % e.strerror, "kind": "file",
+                        "novel": 0, "gain": 0, "relief": 0, "unlock": []}
         if rel.endswith(".bite"):
             m = re.search(r"ENERGY\s*=\s*(\d+)", text)
             gain = int(m.group(1)) if m else 10
@@ -796,6 +816,26 @@ class Body:
                                errors="replace", timeout=timeout)
         except (subprocess.TimeoutExpired, OSError):
             return (False, "", "") if ayrik else (False, "")
+        # (2) Erişim engeli (Permission denied) → sudo ile yeniden dene.
+        # Sadece salt-okunur komutlar için (cat, ls, wc, find, df, vs.)
+        if r.returncode != 0 and "Permission denied" in (r.stderr or ""):
+            _okunur = {"cat", "ls", "wc", "find", "df", "du", "head", "tail",
+                       "readlink", "realpath", "stat", "file", "which",
+                       "md5sum", "sha256sum", "xxd", "hexdump"}
+            if argv[0] in _okunur:
+                sudo_argv = ["sudo"] + list(argv)
+                try:
+                    r2 = subprocess.run(sudo_argv, cwd=str(self.world), env=env,
+                                        shell=False, capture_output=True,
+                                        text=True, errors="replace",
+                                        timeout=timeout)
+                    if r2.returncode == 0:
+                        r = r2
+                    else:
+                        # sudo da başarısız oldu → eski çıktısını döndür
+                        pass
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
         # errors="replace": ikili çıktı (cat /bin/ls gibi) organizmayı
         # ÖLDÜRMEZ. Önceden text=True + katı UTF-8 çözümleme bir konsol
         # komutunda UnicodeDecodeError fırlatıp süreci çökertiyordu.
@@ -903,6 +943,114 @@ class Body:
         facts.append("dakikada %.2f adım" % (os.getloadavg()[0],))
         return {"obs": "; ".join(facts)[:200], "kind": "proc", "novel": 0}
 
+    # ---------- Yeni: Zengin duyular (Aşama 3) ----------\n    def sense_power(self):
+        """Pil / güç durumu: /sys/class/power_supply üzerinden."""
+        facts = []
+        ps = Path("/sys/class/power_supply")
+        try:
+            for bat in sorted(ps.iterdir()):
+                try:
+                    typ = (bat / "type").read_text(encoding="utf-8", errors="replace").strip()[:10]
+                    cap = (bat / "capacity").read_text(encoding="utf-8", errors="replace").strip()
+                    st = (bat / "status").read_text(encoding="utf-8", errors="replace").strip()[:12]
+                    facts.append("pil:%s cap=%s%% st=%s" % (bat.name, cap, st))
+                except OSError:
+                    continue
+        except OSError:
+            pass
+        if not facts:
+            facts.append("pil_bilgisi_yok")
+        return {"obs": "; ".join(facts)[:200], "kind": "power", "novel": 1}
+
+    def sense_sensors(self):
+        """Sıcaklık / sensörler: lm-sensors (sensors komutu) veya /sys/class/hwmon."""
+        facts = []
+        # Önce sensors komutu dene (daha okunabilir)
+        try:
+            import subprocess
+            r = subprocess.run(["sensors"], capture_output=True, text=True,
+                               timeout=4, errors="replace")
+            if r.returncode == 0 and r.stdout:
+                for line in r.stdout.splitlines()[:8]:
+                    if line.strip():
+                        facts.append(line.strip()[:60])
+        except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        # Yedek: /sys/class/hwmon
+        if not facts:
+            hw = Path("/sys/class/hwmon")
+            try:
+                for d in sorted(hw.iterdir())[:4]:
+                    try:
+                        name = (d / "name").read_text(encoding="utf-8", errors="replace").strip()[:20]
+                        for t in sorted(d.glob("temp*_input"))[:2]:
+                            try:
+                                val = int(t.read_text(encoding="utf-8", errors="replace").strip()) / 1000.0
+                                facts.append("hwmon:%s %s=%.1fC" % (name, t.name, val))
+                            except (ValueError, OSError):
+                                continue
+                    except OSError:
+                        continue
+            except OSError:
+                pass
+        if not facts:
+            facts.append("sensör_bilgisi_yok")
+        return {"obs": "; ".join(facts)[:200], "kind": "sensors", "novel": 1}
+
+    def sense_journal(self):
+        """Sistem günlüğü: journalctl son 10 satır (salt-okunur)."""
+        facts = []
+        try:
+            import subprocess
+            r = subprocess.run(["journalctl", "-n", "10", "--no-pager"],
+                               capture_output=True, text=True, timeout=5,
+                               errors="replace")
+            if r.returncode == 0 and r.stdout:
+                for line in r.stdout.splitlines()[:10]:
+                    if line.strip():
+                        facts.append(line.strip()[:80])
+            else:
+                facts.append("journal_erisilemedi")
+        except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
+            facts.append("journal_yok")
+        return {"obs": "; ".join(facts)[:200], "kind": "journal", "novel": 1}
+
+    def sense_usb(self):
+        """USB aygıtları: lsusb."""
+        facts = []
+        try:
+            import subprocess
+            r = subprocess.run(["lsusb"], capture_output=True, text=True,
+                               timeout=4, errors="replace")
+            if r.returncode == 0 and r.stdout:
+                for line in r.stdout.splitlines()[:8]:
+                    if line.strip():
+                        facts.append(line.strip()[:80])
+            else:
+                facts.append("usb_erisilemedi")
+        except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
+            facts.append("usb_yok")
+        return {"obs": "; ".join(facts)[:200], "kind": "usb", "novel": 1}
+
+    def sense_docker(self):
+        """Docker konteynerleri: docker ps (salt-okunur)."""
+        facts = []
+        try:
+            import subprocess
+            r = subprocess.run(["docker", "ps", "--format",
+                                "{{.Names}} {{.Status}}"],
+                               capture_output=True, text=True, timeout=5,
+                               errors="replace")
+            if r.returncode == 0 and r.stdout:
+                for line in r.stdout.splitlines()[:8]:
+                    if line.strip():
+                        facts.append("docker:" + line.strip()[:80])
+            else:
+                facts.append("docker_erisilemedi")
+        except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
+            facts.append("docker_yok")
+        return {"obs": "; ".join(facts)[:200], "kind": "docker", "novel": 1}
+
     def has_nest(self):
         return any(self.world.glob("yuva_*.txt"))
 
@@ -1009,4 +1157,335 @@ class Body:
         if action.startswith("help:"):
             komut = action.split(":", 1)[1]
             return self.help(komut)
+        # Yeni duyular (Aşama 3)
+        if action == "sense_power":
+            return self.sense_power()
+        if action == "sense_sensors":
+            return self.sense_sensors()
+        if action == "sense_journal":
+            return self.sense_journal()
+        if action == "sense_usb":
+            return self.sense_usb()
+        if action == "sense_docker":
+            return self.sense_docker()
+        # ---------- Yeni: Bu bilgisayarın bedeni (Aşama 7) ----------
+        if action == "sense_kullanici":
+            return self.sense_kullanici()
+        if action == "sistem_umuru":
+            return self.sistem_umuru()
+        if action == "terminal_var":
+            return self.terminal_var()
+        # ---------- Yeni: Bu bilgisayarın bedeni — fiziksel durum (Aşama 8) ----------
+        if action == "sense_disk":
+            return self.sense_disk()
+        if action == "sense_bellek":
+            return self.sense_bellek()
+        # ---------- Yeni: USB — kernel seviyesinde (Aşama 10) ----------
+        if action == "sense_usb_kernel":
+            return self.sense_usb_kernel()
+        if action == "sense_usb_nodes":
+            return self.sense_usb_nodes()
+        # ---------- Yeni: Ağ trafiği gözlemi (Aşama Ağ-Beyn) ----------
+        if action == "sense_ag_trafigi":
+            return self.sense_ag_trafigi()
+        # ---------- Yeni: Beden duyuları (Aşama 1) ----------
+        if action == "sense_cpu":
+            return self.sense_cpu()
+        if action == "sense_proses":
+            return self.sense_proses()
         return {"obs": "dinleniyor…", "kind": "rest", "novel": 0}
+
+    # ---------- Yeni: Bu bilgisayarın bedeni (Aşama 7) ----------
+
+    def sense_kullanici(self):
+        """Kimler bu bilgisayarda aktif? (who / w, salt-okunur)."""
+        import subprocess
+        facts = []
+        try:
+            r = subprocess.run(["who"], capture_output=True, text=True,
+                               timeout=3, errors="replace")
+            if r.returncode == 0 and r.stdout:
+                for line in r.stdout.splitlines()[:5]:
+                    if line.strip():
+                        facts.append("kullanici:" + line.strip()[:60])
+        except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        try:
+            r = subprocess.run(["w", "-h"], capture_output=True, text=True,
+                               timeout=3, errors="replace")
+            if r.returncode == 0 and r.stdout:
+                for line in r.stdout.splitlines()[:3]:
+                    if line.strip():
+                        facts.append("aktif:" + line.strip()[:60])
+        except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        if not facts:
+            facts.append("kullanici_yok")
+        return {"obs": "; ".join(facts)[:200], "kind": "kullanici", "novel": 1}
+
+    def sistem_umuru(self):
+        """Bu bilgisayar ne kadar süredir açık? (uptime, load)."""
+        import subprocess
+        facts = []
+        try:
+            with open("/proc/uptime", encoding="utf-8") as f:
+                sn = float(f.read().split()[0])
+            gun = int(sn // 86400)
+            saat = int((sn % 86400) // 3600)
+            dakika = int((sn % 3600) // 60)
+            facts.append("acik:%dg%ds%d" % (gun, saat, dakika))
+        except (OSError, ValueError):
+            pass
+        try:
+            r = subprocess.run(["uptime"], capture_output=True, text=True,
+                               timeout=3, errors="replace")
+            if r.returncode == 0 and r.stdout:
+                facts.append("yuk:" + r.stdout.strip()[:80])
+        except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        if not facts:
+            facts.append("umur_bilinmiyor")
+        return {"obs": "; ".join(facts)[:200], "kind": "umur", "novel": 1}
+
+    def terminal_var(self):
+        """Aktif terminal / oturum cihazları var mı?"""
+        import subprocess
+        facts = []
+        try:
+            r = subprocess.run(["who", "-q"], capture_output=True, text=True,
+                               timeout=3, errors="replace")
+            if r.returncode == 0 and r.stdout:
+                for line in r.stdout.splitlines()[:3]:
+                    if line.strip():
+                        facts.append("oturum:" + line.strip()[:60])
+        except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        try:
+            ttys = [p for p in os.listdir("/dev") if p.startswith("tty")]
+            if ttys:
+                facts.append("tty:%d" % len(ttys))
+        except OSError:
+            pass
+        if not facts:
+            facts.append("terminal_yok")
+        return {"obs": "; ".join(facts)[:200], "kind": "terminal", "novel": 1}
+
+    # ---------- Yeni: Bu bilgisayarın bedeni — fiziksel durum (Aşama 8) ----------
+
+    def sense_disk(self):
+        """Disk doluluk durumu: bu bilgisayarin 'bagliaci' ne kadar dolu?"""
+        import shutil
+        facts = []
+        try:
+            total, used, free = shutil.disk_usage("/")
+            yuzde = round(used / total * 100, 1)
+            facts.append("disk:%s%% (%s GB / %s GB)" % (yuzde, round(used / 2**30, 1), round(total / 2**30, 1)))
+        except OSError:
+            facts.append("disk_bilgisi_yok")
+        return {"obs": "; ".join(facts)[:200], "kind": "disk", "novel": 1}
+
+    def sense_bellek(self):
+        """Bellek (RAM) durumu: bu bilgisayarin 'belleği' ne kadar dolu?"""
+        facts = []
+        try:
+            for line in open("/proc/meminfo", encoding="utf-8"):
+                if line.startswith(("MemTotal", "MemAvailable", "MemFree")):
+                    facts.append(line.strip())
+                if len(facts) >= 3:
+                    break
+        except OSError:
+            facts.append("bellek_bilgisi_yok")
+        return {"obs": "; ".join(facts)[:200], "kind": "bellek", "novel": 1}
+
+    # ---------- Yeni: USB — kernel seviyesinde (Aşama 10) ----------
+
+    def sense_usb_kernel(self):
+        """USB cihazlarını kernel seviyesinde algıla (/sys/bus/usb/devices).
+
+        lsusb yerine doğrudan sysfs okunur: idVendor, idProduct, manufacturer,
+        product ve arayüz sayısı gibi cihaz kimlik bilgileri çıkarılır.
+        Bu organizmanın bu bilgisayara takılan donanım laidını öğrenmesini
+        saglar (uzuv-usb).
+        """
+        import os
+        facts = []
+        cihaz_sayisi = 0
+        usb_root = "/sys/bus/usb/devices"
+        try:
+            for entry in sorted(os.listdir(usb_root)):
+                p = os.path.join(usb_root, entry)
+                if not os.path.isdir(p):
+                    continue
+                # Sadece gerçek cihazlar (ör. "1-1", "2-3"), host controller'lar
+                # ("1-0:1.0" gibi) atlanir.
+                if ":" in entry:
+                    continue
+                cihaz_sayisi += 1
+                def _oku(dosya):
+                    try:
+                        with open(os.path.join(p, dosya), encoding="utf-8",
+                                  errors="replace") as f:
+                            return f.read().strip()[:40]
+                    except OSError:
+                        return ""
+                vendor = _oku("idVendor")
+                product = _oku("idProduct")
+                manuf = _oku("manufacturer")
+                prod = _oku("product")
+                ifaces = _oku("bNumInterfaces")
+                bilgi = "usb:%s v=%s p=%s if=%s" % (
+                    entry, vendor or "?", product or "?", ifaces or "?")
+                if manuf:
+                    bilgi += " mfr=%s" % manuf
+                if prod:
+                    bilgi += " prd=%s" % prod
+                facts.append(bilgi[:100])
+        except OSError:
+            facts.append("usb_sysfs_erisilemedi")
+        if not facts:
+            facts.append("usb_cihaz_yok")
+        obs = "; ".join(facts)[:200]
+        return {"obs": obs, "kind": "usb_kernel",
+                "novel": 1, "cihaz_sayisi": cihaz_sayisi,
+                "cihazlar": facts}
+
+    def sense_usb_nodes(self):
+        """USB cihaz node'larini tarama (/dev/bus/usb).
+
+        Bu organizmanın cihaza erisim iznini (node varligi) gosteren,
+        salt-okunur bir listeledir.
+        """
+        import os
+        facts = []
+        node_sayisi = 0
+        try:
+            for bus in sorted(os.listdir("/dev/bus/usb")):
+                bp = os.path.join("/dev/bus/usb", bus)
+                if not os.path.isdir(bp):
+                    continue
+                for dev in sorted(os.listdir(bp)):
+                    node_sayisi += 1
+                    facts.append("usbnode:%s/%s" % (bus, dev))
+        except OSError:
+            facts.append("usbnode_erisilemedi")
+        if not facts:
+            facts.append("usbnode_yok")
+        return {"obs": "; ".join(facts)[:200], "kind": "usb_nodes",
+                "novel": 1, "node_sayisi": node_sayisi}
+
+    def sense_ag_trafigi(self):
+        """Pasif ağ trafiği gözlemi (/proc/net/tcp, /proc/net/udp).
+
+        Paket içeriği OKUNMAZ, sadece metadata (port, IP, protokol, durum).
+        Bu organizmanın bu bilgisayardaki ağ kalıplarını öğrenmesini sağlar.
+        Enjekte yok, dış bağlantı açma yok, salt-okunur gözlem.
+        """
+        import os
+        facts = []
+        baglanti_sayisi = 0
+        baglantilar = []
+
+        def _oku_proto(dosya):
+            try:
+                with open(dosya, encoding="utf-8", errors="replace") as f:
+                    return f.read().strip().splitlines()
+            except OSError:
+                return []
+
+        for proto, dosya in (("tcp", "/proc/net/tcp"), ("udp", "/proc/net/udp")):
+            satirlar = _oku_proto(dosya)
+            if not satirlar:
+                continue
+            # İlk satır başlık, atla
+            for satir in satirlar[1:]:
+                parca = satir.split()
+                if len(parca) < 10:
+                    continue
+                local_addr = parca[1]
+                remote_addr = parca[2]
+                state_hex = parca[3]
+                try:
+                    local_ip_hex, local_port_hex = local_addr.rsplit(":", 1)
+                    remote_ip_hex, remote_port_hex = remote_addr.rsplit(":", 1)
+                    local_port = int(local_port_hex, 16)
+                    remote_port = int(remote_port_hex, 16)
+                except (ValueError, IndexError):
+                    continue
+                # Sadece dinamik portları veya önemli portları kaydet
+                # (0.0.0.0 dinleyenler ve uzak bağlantıları)
+                baglanti_sayisi += 1
+                baglantilar.append({
+                    "protocol": proto,
+                    "local_port": local_port,
+                    "remote_port": remote_port,
+                    "state": state_hex,
+                })
+                facts.append("%s:%d<->%d st=%s" % (
+                    proto, local_port, remote_port, state_hex))
+
+        if not facts:
+            facts.append("ag_baglanti_yok")
+
+        obs = "; ".join(facts)[:200]
+        return {
+            "obs": obs,
+            "kind": "ag_trafigi",
+            "novel": 1,
+            "baglanti_sayisi": baglanti_sayisi,
+            "baglanti_detay": baglantilar[:20],
+        }
+
+    def sense_cpu(self):
+        """CPU yuk: /proc/loadavg ve /proc/stat'dan 1 dakikaluk ortalama yuk.
+        dondurur: {"obs": str, "kind": "cpu", "novel": 1, "cpu_yuk": 0.0..1.0}"""
+        import os
+        facts = []
+        cpu_yuk = 0.0
+        try:
+            with open("/proc/loadavg", encoding="utf-8") as f:
+                parts = f.read().split()
+                if len(parts) >= 3:
+                    load1 = float(parts[0])
+                    try:
+                        with open("/proc/stat", encoding="utf-8") as fs:
+                            for line in fs:
+                                if line.startswith("cpu "):
+                                    cpu_fields = line.split()
+                                    cpu_vals = [int(x) for x in cpu_fields[1:8]]
+                                    total = sum(cpu_vals)
+                                    idle = cpu_vals[3] + cpu_vals[4]
+                                    if total > 0:
+                                        cpu_yuk = 1.0 - (idle / total)
+                                    break
+                    except (OSError, ValueError):
+                        pass
+                    facts.append("cpu_load1:%.2f" % load1)
+                    facts.append("cpu_yuk:%d%%" % int(cpu_yuk * 100))
+        except OSError:
+            facts.append("cpu_bilgisi_yok")
+        if not facts:
+            facts.append("cpu_yuk_bilinmiyor")
+        return {"obs": "; ".join(facts)[:200], "kind": "cpu", "novel": 1,
+                "cpu_yuk": cpu_yuk}
+
+    def sense_proses(self):
+        """Islem sayisi: /proc altindaki numeric PID dizinleri sayilir.
+        dondurur: {"obs": str, "kind": "proses", "novel": 1,
+                   "proses_sayisi": int, "proses_norm": 0.0..1.0}"""
+        import os
+        facts = []
+        proc_count = 0
+        proc_norm = 0.0
+        try:
+            for entry in os.listdir("/proc"):
+                if entry.isdigit():
+                    proc_count += 1
+            facts.append("proses:%d" % proc_count)
+            proc_norm = min(1.0, proc_count / 1000.0)
+        except OSError:
+            facts.append("proses_bilgisi_yok")
+            proc_norm = 0.0
+        if not facts:
+            facts.append("proses_bilinmiyor")
+        return {"obs": "; ".join(facts)[:200], "kind": "proses", "novel": 1,
+                "proses_sayisi": proc_count, "proses_norm": proc_norm}

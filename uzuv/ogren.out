@@ -1,0 +1,67 @@
+  >> müfredat: görev uzunluğu 2 oldu
+[  10] son 10: çözüm %100 | ort. deneme 54 | maks uzunluk 2
+[  20] son 20: çözüm %95 | ort. deneme 766 | maks uzunluk 2
+  >> müfredat: görev uzunluğu 3 oldu
+[  30] son 20: çözüm %95 | ort. deneme 2010 | maks uzunluk 3
+[  40] son 20: çözüm %90 | ort. deneme 2679 | maks uzunluk 3
+[  50] son 20: çözüm %80 | ort. deneme 6098 | maks uzunluk 3
+[  60] son 20: çözüm %85 | ort. deneme 5051 | maks uzunluk 3
+[  70] son 20: çözüm %80 | ort. deneme 2306 | maks uzunluk 3
+[  80] son 20: çözüm %75 | ort. deneme 4153 | maks uzunluk 3
+[  90] son 20: çözüm %85 | ort. deneme 4214 | maks uzunluk 3
+[ 100] son 20: çözüm %80 | ort. deneme 4115 | maks uzunluk 3
+[ 110] son 20: çözüm %80 | ort. deneme 5500 | maks uzunluk 3
+[ 120] son 20: çözüm %80 | ort. deneme 5467 | maks uzunluk 3
+[ 130] son 20: çözüm %80 | ort. deneme 8994 | maks uzunluk 3
+[ 140] son 20: çözüm %90 | ort. deneme 7169 | maks uzunluk 3
+[ 150] son 20: çözüm %90 | ort. deneme 6754 | maks uzunluk 3
+[ 160] son 20: çözüm %85 | ort. deneme 7379 | maks uzunluk 3
+[ 170] son 20: çözüm %70 | ort. deneme 2043 | maks uzunluk 3
+[ 180] son 20: çözüm %70 | ort. deneme 1705 | maks uzunluk 3
+[ 190] son 20: çözüm %80 | ort. deneme 2141 | maks uzunluk 3
+[ 200] son 20: çözüm %85 | ort. deneme 1596 | maks uzunluk 3
+[ 210] son 20: çözüm %90 | ort. deneme 3533 | maks uzunluk 3
+[ 220] son 20: çözüm %80 | ort. deneme 4005 | maks uzunluk 3
+[ 230] son 20: çözüm %75 | ort. deneme 2680 | maks uzunluk 3
+[ 240] son 20: çözüm %85 | ort. deneme 6829 | maks uzunluk 3
+[ 250] son 20: çözüm %90 | ort. deneme 8834 | maks uzunluk 3
+[ 260] son 20: çözüm %85 | ort. deneme 5068 | maks uzunluk 3
+[ 270] son 20: çözüm %75 | ort. deneme 1161 | maks uzunluk 3
+[ 280] son 20: çözüm %65 | ort. deneme 880 | maks uzunluk 3
+[ 290] son 20: çözüm %80 | ort. deneme 4201 | maks uzunluk 3
+[ 300] son 20: çözüm %90 | ort. deneme 5186 | maks uzunluk 3
+[ 310] son 20: çözüm %80 | ort. deneme 2438 | maks uzunluk 3
+[ 320] son 20: çözüm %80 | ort. deneme 5143 | maks uzunluk 3
+[ 330] son 20: çözüm %80 | ort. deneme 7900 | maks uzunluk 3
+[ 340] son 20: çözüm %85 | ort. deneme 6682 | maks uzunluk 3
+[ 350] son 20: çözüm %85 | ort. deneme 4119 | maks uzunluk 3
+[ 360] son 20: çözüm %90 | ort. deneme 5155 | maks uzunluk 3
+[ 370] son 20: çözüm %85 | ort. deneme 5820 | maks uzunluk 3
+[ 380] son 20: çözüm %75 | ort. deneme 4551 | maks uzunluk 3
+[ 390] son 20: çözüm %80 | ort. deneme 6157 | maks uzunluk 3
+[ 400] son 20: çözüm %75 | ort. deneme 3111 | maks uzunluk 3
+[ 410] son 20: çözüm %75 | ort. deneme 1737 | maks uzunluk 3
+[ 420] son 20: çözüm %80 | ort. deneme 2096 | maks uzunluk 3
+[ 430] son 20: çözüm %90 | ort. deneme 4126 | maks uzunluk 3
+[ 440] son 20: çözüm %100 | ort. deneme 5774 | maks uzunluk 3
+[ 450] son 20: çözüm %100 | ort. deneme 3221 | maks uzunluk 3
+[ 460] son 20: çözüm %90 | ort. deneme 3401 | maks uzunluk 3
+[ 470] son 20: çözüm %70 | ort. deneme 5490 | maks uzunluk 3
+Traceback (most recent call last):
+  File "/home/emrah/Genel/core/uzuv/asm_ogren.py", line 329, in <module>
+    ogren(uzuv, durum, a.dakika, seed=a.seed)
+  File "/home/emrah/Genel/core/uzuv/asm_ogren.py", line 262, in ogren
+    r = coz(uzuv, gorev, durum.agirliklar(ctx), rng, durum.maks_uzunluk)
+  File "/home/emrah/Genel/core/uzuv/asm_ogren.py", line 237, in coz
+    cozum = dene_aday(list(anahtar), [f for _, f in sec], ailer)
+  File "/home/emrah/Genel/core/uzuv/asm_ogren.py", line 207, in dene_aday
+    if not all(_makine_dogrula(uzuv, kod, o, kayit) for o in egitim):
+  File "/home/emrah/Genel/core/uzuv/asm_ogren.py", line 207, in <genexpr>
+    if not all(_makine_dogrula(uzuv, kod, o, kayit) for o in egitim):
+  File "/home/emrah/Genel/core/uzuv/asm_ogren.py", line 186, in _makine_dogrula
+    r = uzuv.tahmin_dene(kod, {"rax": o["cikti"]}, baslangic)
+  File "/home/emrah/Genel/core/uzuv/asm_uzuv.py", line 507, in tahmin_dene
+    self._kaydet_beyn()
+  File "/home/emrah/Genel/core/uzuv/asm_uzuv.py", line 342, in _kaydet_beyn
+    os.replace(str(tmp), str(self.beyn_path))
+FileNotFoundError: [Errno 2] No such file or directory: '/home/emrah/Genel/core/uzuv/asm_beyn.json.tmp' -> '/home/emrah/Genel/core/uzuv/asm_beyn.json'

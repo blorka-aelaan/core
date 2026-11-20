@@ -21,6 +21,7 @@ from pathlib import Path
 sys.path.insert(0, "/home/emrah/Genel/core")
 import golge
 import journal
+from organism import Organism
 
 
 def test_arsivle_golge_deseni():
@@ -230,19 +231,24 @@ def test_retansiyon_arsivlemeden_bagimsiz_calisir():
 
 
 def test_main_periyodik_retansiyon_blogu():
-    """main.py: periyodik retansiyon blogu var ve dogru dizinleri kapsar."""
-    src = (Path("/home/emrah/Genel/core/main.py")).read_text(encoding="utf-8")
-    assert "arsiv_temizle" in src, "main.py retansiyon cagrisi icermeli"
-    # Periyodik tetikleme: arsivlemeden bagimsiz, %1000'de bir
-    assert "arsiv_retansiyon" in src
-    assert 'state["ticks"] % 1000 == 0' in src, \
+    """Organism retansiyonu main modülüne import etmeden uygulamalı."""
+    src = (Path("/home/emrah/Genel/core/organism.py")).read_text(
+        encoding="utf-8"
+    )
+    assert "journal_mod.arsiv_temizle" in src
+    assert "from main import arsiv_retansiyon" not in src
+    assert 'tik % 1000 == 0' in src, \
         "periyodik retansiyon blogu eksik (1000 tikte bir)"
-    # Retansiyon, arşivlenen dosyanin GERCEK hedef dizininde uygulanmali
-    # (sabit ROOT/arsiv yerine) — GOLGE_LOG farkli dizini gosterebilir.
-    assert "str(Path(hedef).parent)" in src, \
-        "retansiyon arsivlenen dosyanin hedef dizininde olmali"
-    assert 'str(ROOT / "arsiv")' not in src, \
-        "sabit ROOT/arsiv dizini kullanilmamali"
+    with tempfile.TemporaryDirectory() as td:
+        target = Path(td) / "arsiv" / "journal_20261105_210000.jsonl"
+        target.parent.mkdir()
+        target.write_text("test\n", encoding="utf-8")
+        organism = Organism.__new__(Organism)
+        organism.jour = type("JournalStub", (), {
+            "log": lambda *_args, **_kwargs: None
+        })()
+        assert organism._arsiv_retansiyon(str(target)) == 0
+        assert organism._arsiv_retansiyon(None) == 0
 
 
 test_arsivle_golge_deseni()

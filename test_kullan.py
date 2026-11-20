@@ -25,7 +25,13 @@ import kullan as K
 
 
 def yeni_kullan():
-    return K.Kullan({})
+    k = K.Kullan({})
+    k._komut_tehlike.help_aciklamalar.clear()
+    return k
+
+
+def komut_eylemleri(k):
+    return {a for a in k.eylemler() if a.startswith("cmd:")}
 
 
 # 1) BEYAZ genişledi
@@ -36,17 +42,20 @@ print("1 BEYAZ genişledi (tail/stat/du eklendi) OK")
 # 2) maske = harita anahtarları (global, ZINCIR kısıtı yok)
 k = yeni_kullan()
 k.hedef = {"tip": "DOSYA_OLC", "yol": "/etc/hostname", "boyut": 1}
-assert set(k.eylemler()) == {"cmd:stat", "cmd:wc", "cmd:du"}, k.eylemler()
+assert komut_eylemleri(k) == {"cmd:stat", "cmd:wc", "cmd:du"}, k.eylemler()
+assert set(a for a in k.eylemler() if a.startswith("help:")) == {
+    "help:stat", "help:wc", "help:du"
+}
 k.hedef = {"tip": "PAKET_VERSIYON", "paket": "coreutils", "surum": "9.1"}
-assert set(k.eylemler()) == {"cmd:dpkg", "cmd:apt-cache"}, k.eylemler()
+assert komut_eylemleri(k) == {"cmd:dpkg", "cmd:apt-cache"}, k.eylemler()
 # harita dışı tip (SUREC_SAY) maskeyi haritadan alır (tam liste):
 k.hedef = {"tip": "SUREC_SAY", "ad": "systemd"}
 k.ara = ""    # bos tampon: wc olcu kapisi KAPALI (2026-10-16 olcumu)
-m = set(k.eylemler())
+m = komut_eylemleri(k)
 assert m == set("cmd:" + c for c in k._harita(k.hedef)), m
 assert "cmd:wc" not in m and "cmd:ps" in m, m   # uretim oncesi wc yok
 k.ara = "111\n"   # uretim adimi gecti → wc kapisi acilir
-m = set(k.eylemler())
+m = komut_eylemleri(k)
 assert "cmd:wc" in m and "cmd:ps" in m, m
 k.ara = ""
 print("2 maske tek kaynaktan (harita), wc tampon-kapili OK")
@@ -54,11 +63,27 @@ print("2 maske tek kaynaktan (harita), wc tampon-kapili OK")
 # 3) DOSYA_OKU: örneğe göre kapı
 k.hedef = {"tip": "DOSYA_OKU", "yol": "/etc/hostname",
            "ornek_bas": None, "ornek_son": "x"}
-assert set(k.eylemler()) == {"cmd:wc", "cmd:tail"}, k.eylemler()
+assert komut_eylemleri(k) == {"cmd:wc", "cmd:tail"}, k.eylemler()
 k.hedef = {"tip": "DOSYA_OKU", "yol": "/etc/hostname",
            "ornek_bas": "debian", "ornek_son": None}
-assert set(k.eylemler()) == {"cmd:wc", "cmd:head"}, k.eylemler()
+assert komut_eylemleri(k) == {"cmd:wc", "cmd:head"}, k.eylemler()
 print("3 DOSYA_OKU kapıları örneğe göre OK")
+
+# Help ilk kez seçilebilir; öğrenilmiş komut için help tekrarlanmaz.
+k = yeni_kullan()
+k.hedef = {"tip": "DOSYA_OLC", "yol": "/etc/hostname", "boyut": 1}
+k._komut_tehlike.help_ogren = lambda komut: (
+    k._komut_tehlike.help_aciklamalar.setdefault(
+        komut, {"aciklama": "Dosya ölçer", "tip": "READ"}
+    ) and (True, "Dosya ölçer")
+)
+k._komut_tehlike.save = lambda: None
+r = k.uygula("help:stat")
+assert r["gain"] == K.ODUL_HELP and r["cost"] == K.MALIYET, r
+assert r["dogru"] is None and r["help_ok"] is True, r
+assert r["hedef_tip"] == "DOSYA_OLC", r
+assert "help:stat" not in k.eylemler()
+print("3b help göreve bağlı sunuldu; ilk keşif ödüllü, tekrar gizli OK")
 
 # 4) DOSYA_OLC uçtan uca: üç kapı da aynı gerçeği doğrular
 fd, yol = tempfile.mkstemp(prefix="kullan_olc_")
@@ -74,6 +99,9 @@ for komut in ("stat", "wc", "du"):
     r = k.uygula("cmd:" + komut)
     assert r["dogru"] is True, (komut, r)
     assert r["gain"] == K.ODUL, (komut, r)
+    assert k._komut_tehlike.komut_ciktilari[
+        "DOSYA_OLC|" + komut
+    ]["dogru"] is True
 os.unlink(yol)
 print("4 DOSYA_OLC stat/wc/du üçü doğruladı OK")
 
@@ -129,6 +157,7 @@ k.ara = ""
 k.hedef_deneme = 0
 r = k.uygula("cmd:ps")   # ps sayı vermez → ara veri → ILERLEME
 assert r["gain"] == K.ILERLEME, r
+assert r["ilerleme"] is True and r["gorev_sonucu"] == "ilerleme", r
 print("8 zincir ara-veri ödülü + bos tampon wc kapisi OK")
 
 # 9) TAMPON GATING: ara bellek doluken veri üretmek ödülsüz
@@ -163,7 +192,7 @@ assert h and h.get("sikistirilmis") is True, h
 assert h.get("ornek_bas"), h  # ÖRNEK ÇÖZÜLMÜŞ halinden okundu
 # kapı: yalnızca çözücü komutlar (wc/head/tail maskede DEĞİL → deneme bütçesi israfı yok)
 k.hedef = dict(h)
-assert set(k.eylemler()) == {"cmd:zcat", "cmd:xz", "cmd:bzip2", "cmd:zstd"}, k.eylemler()
+assert komut_eylemleri(k) == {"cmd:zcat", "cmd:xz", "cmd:bzip2", "cmd:zstd"}, k.eylemler()
 r = k.uygula("cmd:zcat")
 assert r["dogru"] is True and r["gain"] == K.ODUL, r
 # wc artık gz'de KAZANAMAZ (eski sahte zafer kapatıldı):
@@ -392,7 +421,7 @@ print("22 DOSYA_OKU: xz/bzip2/zstd _dogrula OK")
 # 23) SISTEM_SOR: _harita + _dogrula (cpu/bellek/çekirdek, judge-time gerçek)
 k = yeni_kullan()
 k.hedef = {"tip": "SISTEM_SOR", "konu": "cpu", "cekirdek": 4}
-assert set(k.eylemler()) == {"cmd:lscpu"}, k.eylemler()
+assert komut_eylemleri(k) == {"cmd:lscpu"}, k.eylemler()
 assert k._harita(k.hedef) == {"lscpu": ["lscpu"]}
 import os as _os
 r = k._dogrula("CPU(s):                %d\n" % (_os.cpu_count() or 1),
@@ -425,7 +454,7 @@ _tmp = tempfile.NamedTemporaryFile(delete=False)
 _tmp.write(b"merhaba debian\n")
 _tmp.close()
 k.hedef = {"tip": "DOSYA_OZET", "yol": _tmp.name}
-assert set(k.eylemler()) == {"cmd:md5sum", "cmd:sha256sum"}
+assert komut_eylemleri(k) == {"cmd:md5sum", "cmd:sha256sum"}
 _d5 = _hl.md5(b"merhaba debian\n").hexdigest()
 _d256 = _hl.sha256(b"merhaba debian\n").hexdigest()
 r = k._dogrula("%s  %s\n" % (_d5, _tmp.name), ["md5sum", _tmp.name])
@@ -443,7 +472,7 @@ print("24 DOSYA_OZET: md5sum/sha256sum _dogrula OK")
 # 25) DOSYA_HAM: hexdump/xxd — ilk 8 baytın hex'i çıktıda (judge-time okur)
 k = yeni_kullan()
 k.hedef = {"tip": "DOSYA_HAM", "yol": "/bin/ls"}
-assert set(k.eylemler()) == {"cmd:hexdump", "cmd:xxd"}
+assert komut_eylemleri(k) == {"cmd:hexdump", "cmd:xxd"}
 with open("/bin/ls", "rb") as _f:
     _ilk = _f.read(8).hex()
 # hexdump -C biçimi (boşluklu) ve xxd biçimi (gruplu) ikisi de geçer

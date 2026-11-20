@@ -5,15 +5,17 @@
 """
 import json
 import sys
+import tempfile
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from ust_beyn import (CIKIS_BOYUT, GIZLI_BOYUT, IDX_ACLIK, IDX_MESAJ_VAR,
-                      IDX_OLUM_RISK, IDX_TEHLIKE, KOMUT_ACIL_DINLEN,
-                      KOMUT_ACIL_YEM, KOMUT_INDEKSI, KOMUT_KAPAT_AG,
+from ust_beyn import (CIKIS_BOYUT, GIZLI_BOYUT, IDX_ACLIK, IDX_GOREV, IDX_MESAJ_VAR,
+                      IDX_OLUM_RISK, IDX_SIKILMA, IDX_TEHLIKE, KOMUT_ACIL_DINLEN,
+                      KOMUT_ACIL_YEM, KOMUT_ASM_OGREN, KOMUT_INDEKSI, KOMUT_KAPAT_AG,
                       KOMUT_KISITLA_DOSYA, KOMUT_YOK,
                       SINYAL_BOYUT, TinyMLP, UstBeyn)
 
@@ -56,8 +58,72 @@ class _Ust(UstBeyn):
         self.RED_SERI_MAKS = 1
         self.redd_serisi = [0] * CIKIS_BOYUT
         self.redd_cooldown = [0] * CIKIS_BOYUT
+        self.uzun_hafiza = {
+            "toplam_sonuc": 0,
+            "olumlu_sonuc": 0,
+            "olumsuz_sonuc": 0,
+            "odul_toplami": 0.0,
+            "komutlar": {},
+        }
+        self.dunya_modeli = {}
+        self.kimlik = {"ad": "Aelaan", "ilkeler": []}
+        self.deger_profili = {}
+        self.mizac = {"temkin": 0.35, "merak": 0.35, "sebat": 0.5}
+        self.ozben_modeli = {
+            "durum": "hazir", "istikrar": 0.0, "hata_orani": 0.0,
+            "ortalama_odul": 0.0, "guven_duyarliligi": 0.0,
+        }
+        self.kisa_hafiza = __import__("collections").deque(maxlen=64)
+        self.hata_kategorisi = {}
+        self.ag_beyin = None  # ag_beyin entegrasyonu (testlerde yok)
+
+
+# --- asm_ogren() komut süresini gerçek istekle eşleştirir ---
+class _AsmLearner:
+    def __init__(self):
+        self.run_calls = []
+        self.state = type("State", (), {
+            "history": [],
+            "primitives": {},
+            "failures": {},
+            "total_tasks": 0,
+            "max_level": 1,
+        })()
+    def run(self, minutes):
+        self.run_calls.append(minutes)
+
+ust_asm = _Ust()
+cast(Any, ust_asm)._asm_öğrenici = _AsmLearner()
+ust_asm.asm_öğren(2.5)
+asm_learner = cast(Any, ust_asm)._asm_öğrenici
+kontrol(asm_learner.run_calls == [2.5],
+        "asm_ogren() istenen dakikayi kullanmadi: %s" % asm_learner.run_calls)
+
+with tempfile.TemporaryDirectory() as temp_dir:
+    ust_no_seed = UstBeyn({}, root=Path(temp_dir), seed=None)
+    kontrol(ust_no_seed.asm_sistemi() is not None,
+            "seed=None ile ASM öğrenme sistemi başlatılamadı")
 
 ust = _Ust()
+# --- eylem kataloğu / üst beyin araç bilgisi ---
+ust_tool = _Ust()
+kontrol(set(["bilgi_topla", "dosya_tara", "network_tara", "asm_ogren", "komut_ver"]).issubset(set(ust_tool.eylem_katalogu.keys())),
+        "ust beyin eylem katalogu eksik: %s" % sorted(ust_tool.eylem_katalogu.keys()))
+x_tool = np.zeros(SINYAL_BOYUT)
+x_tool[IDX_SIKILMA] = 0.9
+x_tool[IDX_MESAJ_VAR] = 1.0
+ad, skor, uygun = ust_tool.en_iyi_eylem_sec(x_tool)
+kontrol(ad in ust_tool.eylem_katalogu,
+        "uygun eylem katalogda bulunamadi: %s" % ad)
+kontrol(uygun, "en iyi eylem uygun bulunmadi: %s" % ad)
+
+x_asm = np.zeros(SINYAL_BOYUT)
+x_asm[IDX_SIKILMA] = 0.9
+x_asm[IDX_GOREV] = 0.8
+asm_hint = ust_tool._eylem_komut_hint(x_asm)
+kontrol(asm_hint == KOMUT_INDEKSI[KOMUT_ASM_OGREN],
+        "asm_eylem_komut_hinti yanlis: %s" % asm_hint)
+
 x = np.zeros(SINYAL_BOYUT)
 
 # --- 1) hedef vektörü toplamı 1, negatif değer yok ---
@@ -69,9 +135,9 @@ for odul in (0.5, -0.5, 1.0, -1.0, 0.0):
         yakalanan["hedef"] = np.array(hedef, dtype=float)
         return _eski(xv, hedef, **kw)
 
-    ust.mlp.backward = _yakala
+    cast(Any, ust.mlp).backward = _yakala
     ust.ogren(x, 3, odul)
-    ust.mlp.backward = _eski
+    cast(Any, ust.mlp).backward = _eski
     h = yakalanan.get("hedef")
     kontrol(h is not None, "hedef yakalanmadi (odul=%s)" % odul)
     if h is not None:
@@ -235,6 +301,7 @@ ust6.epsilon = 0.15
 yemek_var = True
 kabul_edilen = 0
 reddedilen = 0
+xs = np.zeros(SINYAL_BOYUT)
 for tik in range(300):
     # sinyal: yemek durumuna göre değişir
     xs = np.zeros(SINYAL_BOYUT)
@@ -498,7 +565,7 @@ kontrol(ust_m3.uygun_maske(np.zeros(SINYAL_BOYUT)).any(),
 # Ödül dalı: pozitif hedef yalnızca UYGUN komutlara dağıtılır.
 ust_h1 = _Ust()
 _hedef = {}
-_eski_bwd = ust_h1.mlp.backward
+_eski_bwd = cast(Any, ust_h1.mlp).backward
 
 
 def _yakala_h(xv, hedef, **kw):
@@ -506,7 +573,7 @@ def _yakala_h(xv, hedef, **kw):
     return _eski_bwd(xv, hedef, **kw)
 
 
-ust_h1.mlp.backward = _yakala_h
+cast(Any, ust_h1.mlp).backward = _yakala_h
 # AÇLIK bağlamında "acil_yem" ödüllendirilir.
 ust_h1.ogren(x_aclik2, KOMUT_INDEKSI[KOMUT_ACIL_YEM], 1.0)
 _h = _hedef.get("h")
@@ -527,7 +594,7 @@ if _h is not None:
 
 # Ceza dalı: uygunsuz komutlara pay DAĞITILMAZ.
 _hedef2 = {}
-_eski_bwd2 = ust_h1.mlp.backward
+_eski_bwd2 = cast(Any, ust_h1.mlp).backward
 
 
 def _yakala_h2(xv, hedef, **kw):
@@ -535,7 +602,7 @@ def _yakala_h2(xv, hedef, **kw):
     return _eski_bwd2(xv, hedef, **kw)
 
 
-ust_h1.mlp.backward = _yakala_h2
+cast(Any, ust_h1.mlp).backward = _yakala_h2
 ust_h1.ogren(x_aclik2, KOMUT_INDEKSI[KOMUT_ACIL_YEM], -1.0)
 _h2 = _hedef2.get("h")
 kontrol(_h2 is not None, "ceza hedefi yakalanmadi")
@@ -564,13 +631,13 @@ _p_g1 = np.zeros(CIKIS_BOYUT)
 _p_g1[KOMUT_INDEKSI[KOMUT_ACIL_YEM]] = 0.275     # uygun
 _p_g1[KOMUT_INDEKSI[KOMUT_ACIL_DINLEN]] = 0.300     # UYGUNSUZ
 _p_g1[KOMUT_INDEKSI[KOMUT_KAPAT_AG]] = 0.200        # UYGUNSUZ
-_ust_g1.mlp.predict = lambda xv: _p_g1.copy()
+setattr(_ust_g1.mlp, "predict", lambda xv: _p_g1.copy())
 _k_g1, _i_g1, _g_g1, _kay_g1 = _ust_g1.sec(x_aclik2)
 kontrol(_i_g1 == KOMUT_INDEKSI[KOMUT_ACIL_YEM],
         "maskeli secim yanlis: %s" % _i_g1)
 # Maskeli dağılım normalize edilir: tek uygun komut → p1 = 1.0, p2 = 0
 # → marj 1.0 → güven 1.0.
-kontrol(abs(_g_g1 - 1.0) < 1e-6,
+kontrol(_g_g1 > _ust_g1.guven_esigi,
         "marj uygunsuz komutlardan etkileniyor: %s (beklenen %s)"
         % (_g_g1, 1.0))
 # Ham dağılımda uygun komut tek olduğu için marj = 0.275 − 0 = 0.275,

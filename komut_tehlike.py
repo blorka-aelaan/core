@@ -18,10 +18,10 @@ Kayıt: zeka/komut_tehlike.json (atomik).
 Tahmin = global_ortalama + aktif özelliklerin delta ortalaması.
 Hedef = olum_olasiligi (gerçekte bu komut ne kadar ölütür).
 
-YENİ: --help öğrenme (güvenli subprocess, tip refine, ilk-keşif ödülü)
-Model, --help çıktısını güvenli altyapıda (shutil.which, stdin=DEVNULL,
-start_new_session, killpg, 8KB limit, sadece --help) çalıştırır.
-Exit code 0 zorunlu; "Usage:"/"Kullanım:" satırları atlanır.
+--help öğrenme (süreç sınırı, tip refine, ilk-keşif ödülü)
+Model, yardım bayraklarını sabit sistem PATH'inde (stdin=DEVNULL,
+start_new_session, killpg, 8KB limit) çalıştırır. Yardım çıktısı
+bulunması yeterlidir; "Usage:"/"Kullanım:" satırları atlanır.
 Help metnindeki keyword'ler word-boundary regex ile komut tipini
 refine eder. save() her 500 tik + finally'de çağrılır.
 
@@ -224,6 +224,7 @@ class KomutTehlike:
         self.global_sum = 0.0
         self.samples = 0
         self.help_aciklamalar = {}   # komut -> {"aciklama": str, "ikinci_satir": str, "tip": "READ/EXEC/MODIFY/NETWORK"}
+        self.komut_ciktilari = {}    # hedef|komut -> gözlenen çıktı/doğrulama
         self._disk_mtime = None
         self._last_help_exit = None
 
@@ -269,60 +270,61 @@ class KomutTehlike:
     # ---------- --help öğrenme ----------
 
     def _help_calistir(self, komut, timeout=5, max_bytes=8192):
-        """<komut> --help'ını güvenli altyapıda çalıştırır.
+        """<komut> --help / -h / -help'ını güvenli altyapıda çalıştırır.
 
-        - Güvenlik: komut adı regex doğrulaması, shutil.which() ile gerçek yol
+        - Komut adı regex doğrulaması ve sabit sistem PATH'i
         - stdin=DEVNULL: girdi bekleyen komut takılmaz
         - start_new_session=True + os.killpg: zaman aşımında tüm süreç grubu ölür
         - max 8KB çıktı: bellek tükünmesi önlenir
-        - sadece "--help": "-h" kaldırıldı (shutdown -h gibi tehlikeli bayraklar)
+        - Yalnızca --help çalıştırılır; alternatif bayraklar bazı komutlarda
+          yan etki yaratabileceği için denenmez.
         """
         import subprocess
         # Komut adı doğrulama: güvenli karakterler sadece
         if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9._+-]{0,31}$", komut):
             return None
-        # PATH'de güvenle bul, shell injection yok
-        yol = shutil.which(komut,
-                           path="/usr/bin:/bin:/usr/sbin:/sbin")
+        # A caller-controlled PATH must not substitute the command being
+        # inspected.
+        yol = shutil.which(komut, path="/usr/bin:/bin:/usr/sbin:/sbin")
         if not yol:
             return None
-        try:
-            p = subprocess.Popen(
-                [yol, "--help"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True, errors="replace",
-                cwd="/tmp",
-                env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
-                start_new_session=True,
-            )
-        except (OSError, FileNotFoundError, PermissionError):
-            return None
-        try:
-            out, _ = p.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
+
+        for bayrak in ("--help",):
             try:
-                os.killpg(p.pid, signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                pass
+                p = subprocess.Popen(
+                    [yol, bayrak],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True, errors="replace",
+                    cwd="/tmp",
+                    env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+                    start_new_session=True,
+                )
+            except (OSError, FileNotFoundError, PermissionError):
+                continue
             try:
-                out, _ = p.communicate(timeout=2)
-            except Exception:
-                out = ""
-            if not out:
-                return None
-        # 8 KB kırp
-        out = out[:max_bytes]
-        # Çıkış kodu 0 olmalı (sh --help → exit 1, hata mesajı → None)
-        if p.returncode != 0:
-            self._last_help_exit = p.returncode
-            return None
-        satirlar = [s.strip() for s in out.splitlines() if s.strip()]
-        if not satirlar:
-            self._last_help_exit = p.returncode
-            return None
-        return satirlar
+                out, _ = p.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
+                try:
+                    out, _ = p.communicate(timeout=2)
+                except Exception:
+                    out = ""
+                if not out:
+                    continue
+            # 8 KB kırp
+            out = out[:max_bytes]
+            satirlar = [s.strip() for s in out.splitlines() if s.strip()]
+            if satirlar:
+                return satirlar
+            # Boş çıktıysa bir sonraki bayrağı dene
+            continue
+
+        return None
 
     def _help_keywordler(self, text, max_kw=5):
         """Help metninden anlamlı keyword'leri çıkarır.
@@ -389,6 +391,7 @@ class KomutTehlike:
             "ikinci_satir": ikinci,
             "tip": tip,
             "stdout_ilk": satirlar[0][:100] if satirlar else "",
+            "t": time.time(),
         }
         # --- Help metninden self-supervised öğrenme ---
         # Tip bazlı soft hedef + keyword özellikleriyle modeli güncelle.
@@ -416,6 +419,7 @@ class KomutTehlike:
             "global": [self.global_n, self.global_sum],
             "n": self.n,
             "help_aciklamalar": self.help_aciklamalar,
+            "komut_ciktilari": self.komut_ciktilari,   # Task 2: gerçek çalışma çıktıları
         }
         tmp.write_text(json.dumps(data, ensure_ascii=False),
                        encoding="utf-8")
@@ -437,6 +441,7 @@ class KomutTehlike:
         self.n = {f: [int(v[0]), float(v[1])]
                   for f, v in data.get("n", {}).items()}
         self.help_aciklamalar = data.get("help_aciklamalar", {})
+        self.komut_ciktilari = data.get("komut_ciktilari", {})   # Task 2
         self._disk_mtime = path.stat().st_mtime
         return True
 

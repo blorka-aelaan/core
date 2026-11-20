@@ -31,7 +31,7 @@ export function sure(sn) {
 }
 
 export function saat(t) {
-  if (!t) return "—";
+  if (!t || t < 1000000000) return "—";
   return new Date(t * 1000).toLocaleTimeString("tr-TR", { hour12: false });
 }
 
@@ -86,6 +86,9 @@ export function Vital({ d }) {
   }
   const c = d.canli, a = c.act || {};
   const e = a.E ?? 0, h = a.H ?? 0, s = c.sikilma ?? 0;
+  const b = c.beden || {};
+  const u = c.usb || {};
+  const m = c.mood || {};
   return (
     <div className="kart">
       <h2>Vital<span className="yan">
@@ -99,6 +102,10 @@ export function Vital({ d }) {
           <div className="alt">AÇLIK</div></div>
         <div><div className="sayi">{a.R ?? "—"}</div>
           <div className="alt">SON ÖDÜL</div></div>
+        {a.R_dis != null && (
+          <div><div className="sayi">{a.R_dis > 0 ? "+" : ""}{a.R_dis}</div>
+            <div className="alt">Dış Geri</div></div>
+        )}
         <div><div className="sayi">{s.toFixed(2)}</div>
           <div className="alt">SIKILMA (S)</div></div>
       </div>
@@ -107,8 +114,75 @@ export function Vital({ d }) {
         sag={e + " / 450"} />
       <Cubuk etiket="açlık" deger={h} maks={100} renk="var(--turuncu)"
         sag={h + " / 100"} />
-      <Cubuk etiket="sıkılma" deger={s} maks={1} renk="var(--mor)"
+      <Cubuk etiket="sıkılma" deger={s} maks={1}
+        renk={s >= 0.66 ? "var(--kirmizi)" : "var(--mor)"}
         sag={s.toFixed(2)} />
+      {b.disk_yuzde != null && b.bellek_yuzde != null && (
+        <>
+          <div className="not11 soluk">
+            insan: {b.insan_var ? "var" : "yok"} ·
+            sistem: {b.sistem_saati ? Math.round(b.sistem_saati) + "s" : "—"} ·
+            disk: {b.disk_yuzde}% ·
+            bellek: {b.bellek_yuzde}%
+          </div>
+          <Cubuk etiket="disk" deger={b.disk_yuzde} maks={100}
+            renk={b.disk_yuzde > 80 ? "var(--kirmizi)" : "var(--yesil)"}
+            sag={b.disk_yuzde + " %"} />
+          <Cubuk etiket="bellek" deger={b.bellek_yuzde} maks={100}
+            renk={b.bellek_yuzde > 80 ? "var(--kirmizi)" : "var(--yesil)"}
+            sag={b.bellek_yuzde + " %"} />
+        </>
+      )}
+      {u.cihaz_sayisi != null && (
+        <>
+          <div className="not11 soluk">
+            usb cihaz: {u.cihaz_sayisi} · usb node: {u.node_sayisi}
+          </div>
+        </>
+      )}
+      {m.dominant != null && (
+        <>
+          <div className="not11 soluk">
+            ruh: {m.dominant} ·
+            mutluluk: {Math.round(m.mutluluk * 100)}% ·
+            korku: {Math.round(m.korku * 100)}% ·
+            güven: {Math.round(m.guven * 100)}% ·
+            merak: {Math.round(m.merak * 100)}%
+          </div>
+          <Cubuk etiket="mutluluk" deger={Math.round(m.mutluluk * 100)} maks={100}
+            renk="var(--yesil)"
+            sag={Math.round(m.mutluluk * 100) + " %"} />
+          <Cubuk etiket="korku" deger={Math.round(m.korku * 100)} maks={100}
+            renk={m.korku > 0.6 ? "var(--kirmizi)" : "var(--mor)"}
+            sag={Math.round(m.korku * 100) + " %"} />
+          <Cubuk etiket="güven" deger={Math.round(m.guven * 100)} maks={100}
+            renk="var(--mavi)"
+            sag={Math.round(m.guven * 100) + " %"} />
+          <Cubuk etiket="merak" deger={Math.round(m.merak * 100)} maks={100}
+            renk="var(--turuncu)"
+            sag={Math.round(m.merak * 100) + " %"} />
+        </>
+      )}
+      {(c.nn_usb || c.nn_ag || c.nn_ana) && (
+        <div className="not11 soluk" style={{ marginTop: 8, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 8 }}>
+          <div style={{ fontWeight: 'bold', marginBottom: 4 }}>NÖRAL BEYİNLER</div>
+          {c.nn_usb && (
+            <div style={{ fontSize: '0.85rem', marginBottom: 2 }}>
+              USB Beyn: katmanlar [{c.nn_usb.katmanlar?.join(',')}] · lr: {c.nn_usb.lr} · MSE: {(c.nn_usb.son_mse ?? 0).toFixed(4)} · öğrenme: {c.nn_usb.öğrenme_sayısı ?? 0}
+            </div>
+          )}
+          {c.nn_ag && (
+            <div style={{ fontSize: '0.85rem', marginBottom: 2 }}>
+              Ağ Beyn: katmanlar [{c.nn_ag.katmanlar?.join(',')}] · lr: {c.nn_ag.lr} · MSE: {(c.nn_ag.son_mse ?? 0).toFixed(4)} · öğrenme: {c.nn_ag.öğrenme_sayısı ?? 0}
+            </div>
+          )}
+          {c.nn_ana && (
+            <div style={{ fontSize: '0.85rem', marginBottom: 2 }}>
+              Ana Beyn: katmanlar [{c.nn_ana.katmanlar?.join(',')}] · lr: {c.nn_ana.lr} · MSE: {(c.nn_ana.son_mse ?? 0).toFixed(4)} · öğrenme: {c.nn_ana.öğrenme_sayısı ?? 0}
+            </div>
+          )}
+        </div>
+      )}
       <div className="not11 soluk">
         son eylem ({saat(a.t)}): <b>{a.action}</b> —
         {" "}{String(a.obs || "").slice(0, 90)}
@@ -118,12 +192,160 @@ export function Vital({ d }) {
         {c.ticks_s ? ` · tik ≈ ${c.ticks_s} sn` : ""}
         {d.beyin?.baglanti ? ` · beyin: ${d.beyin.baglanti} bağlantı` : ""}
       </div>
+      {(d.hatalar || []).filter(h => h.tur === "tekrar_basarısızlık").length > 0 && (
+        <div className="not11 hata" style={{ marginTop: 6 }}>
+          ⚠ {(d.hatalar || []).filter(h => h.tur === "tekrar_basarısızlık").length}
+          tekrarlayan başarisizlik (son 20 hata)
+        </div>
+      )}
     </div>
   );
 }
+
+export function Evren({ d }) {
+  const world = d?.evren;
+  if (!world) {
+    return (
+      <div className="kart">
+        <h2>Evren</h2>
+        <div className="not11 soluk">henüz çevre gözlemi yok</div>
+      </div>
+    );
+  }
+  const local = world.local || {};
+  const internet = world.internet || [];
+  return (
+    <div className="kart">
+      <h2>Evren
+        <span className="yan">ev: bu bilgisayar · dış dünya: internet</span>
+      </h2>
+      <div className="chips">
+        <span className="rozet">{world.tokens?.[0] || "yerel gözlem"}</span>
+        <span className="rozet">
+          CPU {local.cpu ?? "?"} · disk {local.disk || "?"} · bellek
+          {" "}{local.memory || "?"} · arayüz {local.interfaces || "?"}
+        </span>
+      </div>
+      <div className="not11 soluk" style={{ marginTop: 6 }}>
+        Dış gözlem: {!world.internet_enabled
+          ? "kapalı (izin listesi yapılandırılmamış)"
+          : internet.length
+            ? internet.map((site) => site.status
+              ? `${site.host}: HTTP ${site.status}`
+              : `${site.host}: erişilemedi (${site.error || "bekleniyor"})`)
+              .join(" · ")
+            : "izinli adreslerden yanıt bekleniyor"}
+      </div>
+      <div className="not11 soluk">
+        Yalnızca HTTPS yanıt başlıkları okunur; gövde içeriği okunmaz veya
+        öğrenme belleğine yazılmaz. Son gözlem {saat(world.t)}.
+      </div>
+    </div>
+  );
+}
+
+export function YerelSurec({ d }) {
+  const surec = d?.surec;
+  const sample = surec?.son;
+  if (!surec || !sample) {
+    return (
+      <div className="kart">
+        <h2>Bilgisayar işleyişi</h2>
+        <div className="not11 soluk">
+          yerel süreç gözlemi bekleniyor
+          {surec?.ornek ? ` · ${surec.ornek} örnek kaydedildi` : ""}
+        </div>
+      </div>
+    );
+  }
+  const processes = sample.surecler || [];
+  const profiles = Object.keys(surec.profiller || {}).length;
+  return (
+    <div className="kart">
+      <h2>Bilgisayar işleyişi
+        <span className="yan">{surec.ornek} örnek · {profiles} öğrenilen süreç profili</span>
+      </h2>
+      <div className="chips">
+        <span className="rozet">
+          süreç {sample.surec_sayisi ?? "?"} · tür {sample.surec_turu ?? "?"}
+        </span>
+        <span className="rozet">
+          CPU {sample.cpu_yuzde == null ? "ölçülüyor" : `${sample.cpu_yuzde}%`}
+          {" · "}bellek {sample.bellek_yuzde == null
+            ? "?" : `${sample.bellek_yuzde}%`}
+        </span>
+        <span className="rozet">
+          çalışan {sample.calisan ?? "?"} · bekleyen {sample.bekleyen ?? "?"}
+        </span>
+      </div>
+      <div className="not11 soluk" style={{ marginTop: 6 }}>
+        Örneklenen yerel süreçlerin CPU ve bellek örüntüleri zaman içinde
+        öğrenilir; PID ve komut satırı saklanmaz.
+      </div>
+      {processes.length > 0 && (
+        <div className="liste">
+          {processes.slice(0, 8).map((process) => (
+            <div className="satir" key={process.ad}>
+              <b>{process.ad}</b>
+              <span>
+                {process.adet} süreç · CPU {process.cpu_yuzde == null
+                  ? "—" : `${process.cpu_yuzde}%`}
+                {" · "}{((process.bellek_kb || 0) / 1024).toFixed(1)} MB
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="not11 soluk">
+        Son örnek: {saat(sample.t)}
+        {sample.yeni?.length ? ` · yeni: ${sample.yeni.slice(0, 4).join(", ")}` : ""}
+        {sample.eksik?.length ? ` · kayıp: ${sample.eksik.slice(0, 4).join(", ")}` : ""}
+      </div>
+    </div>
+  );
+}
+
 // ---------- öğrenme / komut kullanımı ----------
 export function Kullan({ d }) {
+  if (!d || !d.kullan) {
+    return (<div className="kart"><h2>Öğrenme — komut kullanımı</h2>
+      <div className="not11 soluk">yükleniyor…</div></div>);
+  }
   const k = d.kullan;
+  const komutHelp = d.komut_help || {};
+  const komutCiktilari = d.komut_ciktilari || {};
+  const testSatirlari = Object.entries(komutCiktilari).map(([anahtar, v]) => {
+    const [hedef, eskiKomut] = anahtar.split("|");
+    const komut = v.komut || eskiKomut || anahtar;
+    return {
+      anahtar,
+      komut,
+      hedef: v.hedef || hedef || "—",
+      help: komutHelp[komut] || null,
+      test: v,
+    };
+  });
+  const testEdilenler = new Set(testSatirlari.map((s) => s.komut));
+  const helpSatirlari = Object.entries(komutHelp)
+    .filter(([komut]) => !testEdilenler.has(komut))
+    .map(([komut, help]) => ({
+      anahtar: `help:${komut}`,
+      komut,
+      hedef: "—",
+      help,
+      test: null,
+    }));
+  const komutSatirlari = [...testSatirlari, ...helpSatirlari]
+    .map((satir, sira) => ({
+      ...satir,
+      siralama: Math.max(
+        Number(satir.test?.t) || Number(satir.test?.deneme) || 0,
+        Number(satir.help?.t) || 0,
+        sira / 1_000_000,
+      ),
+    }))
+    .sort((a, b) => b.siralama - a.siralama)
+    .slice(0, 10);
   return (
     <div className="kart">
       <h2>Öğrenme — komut kullanımı
@@ -131,24 +353,24 @@ export function Kullan({ d }) {
       <div className="istat">
         <div><div className="sayi">%{yuzde(k.oran)}</div>
           <div className="alt">BAŞARI (tümü)</div></div>
-        <div><div className="sayi">%{yuzde(k.zincir.baslatilan
+        <div><div className="sayi">%{yuzde(k.zincir?.baslatilan
           ? k.zincir.ok / k.zincir.baslatilan
-          : d.kullan?.zincir_oran)}</div>
+          : k?.zincir_oran)}</div>
           <div className="alt">ZİNCİR TAMAM</div></div>
-        <div><div className="sayi">{k.zincir.ilerleme}</div>
+        <div><div className="sayi">{k.zincir?.ilerleme ?? "—"}</div>
           <div className="alt">ARA VERİ ADIMI</div></div>
-        <div><div className="sayi">{d.birak.n}</div>
+        <div><div className="sayi">{d.birak?.n ?? "—"}</div>
           <div className="alt">İNKÂR (bırak)</div></div>
       </div>
       {["1", "2", "3"].map((x) => {
-        const v = k.deneme[x];
+        const v = k.deneme?.[x];
         if (!v) return null;
         const renk = x === "1" ? "var(--yesil)"
           : x === "2" ? "var(--sari)" : "var(--kirmizi)";
         return <Cubuk key={x}
           etiket={"deneme " + (x === "3" ? "3+" : x)}
           deger={v.ok} maks={v.n} renk={renk}
-          sag={`${v.ok}/${v.n} · %${yuzde(v.ok / v.n)}`} />;
+          sag={`${v.ok}/${v.n} · %${yuzde(v.n ? v.ok / v.n : 0)}`} />;
       })}
       <table>
         <thead>
@@ -156,12 +378,12 @@ export function Kullan({ d }) {
             <th className="sag">doğru</th></tr>
         </thead>
         <tbody>
-          {k.hedefler.map((h) => (
+          {(k.hedefler || []).map((h) => (
             <tr key={h.tip}>
               <td>{h.tip}</td>
               <td className="sag">{h.n}</td>
               <td className="sag">%{yuzde(h.baslatilan
-                ? h.ok / h.baslatilan : h.ok / h.n)}</td>
+                ? h.ok / h.baslatilan : h.n ? h.ok / h.n : 0)}</td>
             </tr>
           ))}
         </tbody>
@@ -176,11 +398,51 @@ export function Kullan({ d }) {
             .map((s) => `${s.komut}${s.dogru ? " ✓" : " ✗"}`).join(" · ")}
         </div>
       )}
-      {d.birak.n > 0 && (
+      {d.birak?.n > 0 && (
         <div className="not11 soluk">
           bırak dağılımı: {Object.entries(d.birak.deneme)
             .map(([z, n]) => `deneme${z}=${n}`).join(" · ")}
         </div>
+      )}
+      {(komutSatirlari.length > 0) && (
+        <>
+          <div className="not11 soluk" style={{ marginTop: 8 }}>
+            son 10 komut keşfi ve denemesi · {Object.keys(komutHelp).length}
+            help öğrenildi · {testSatirlari.length} komut/hedef denemesi
+          </div>
+          <table style={{ marginTop: 4 }}>
+            <thead>
+              <tr><th>komut</th><th>help / tür</th><th>hedef</th>
+                <th>test</th><th>sonuç / çıktı</th></tr>
+            </thead>
+            <tbody>
+              {komutSatirlari.map(({ anahtar, komut, hedef, help, test }) => (
+                  <tr key={anahtar}>
+                    <td>{komut}</td>
+                    <td title={help?.ikinci_satir || ""}>
+                      {help
+                        ? `${help.tip || "?"}: ${help.aciklama || ""}`
+                        : "help kaydı yok"}
+                    </td>
+                    <td>{hedef}</td>
+                    <td>{test
+                      ? `${test.dogru === true ? "başarılı" : test.dogru === false ? "başarısız" : "sonuç belirsiz"} · #${test.deneme ?? "—"}`
+                      : "henüz cmd testi yok"}</td>
+                    <td style={{ fontSize: 11, maxWidth: 260,
+                      whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+                      {test
+                        ? String(test.obs || "(boş çıktı)").slice(0, 180)
+                        : "—"}
+                    </td>
+                  </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="not11 soluk" style={{ marginTop: 4 }}>
+            help satırları öğrenilen açıklamaları; cmd satırları komutun
+            hedefte gerçekten denenmesini ve doğrulama çıktısını gösterir.
+          </div>
+        </>
       )}
     </div>
   );
@@ -189,16 +451,88 @@ export function Kullan({ d }) {
 // ---------- beyin ----------
 export function Beyin({ d }) {
   const b = d.beyin, s = d.seriler;
+  const guclu = b.guclu || [];
+
+  // Eylem türlerine göre grupla
+  const gruplara = {};
+  guclu.forEach((g) => {
+    const act = g.action;
+    let tur;
+    if (act === "eat") tur = "ye";
+    else if (act === "rest") tur = "dinlen";
+    else if (act === "wander") tur = "gezin";
+    else if (act.startsWith("cmd:")) tur = "komut";
+    else if (act.startsWith("help:")) tur = "help";
+    else if (act.startsWith("explore:")) tur = "keşif";
+    else if (act.startsWith("go:")) tur = "git";
+    else if (act.startsWith("read:")) tur = "oku";
+    else if (act.startsWith("console")) tur = "konsol";
+    else tur = "diğer";
+    if (!gruplara[tur]) gruplara[tur] = [];
+    gruplara[tur].push(g);
+  });
+
+  // Komut eylemlerini ayrı göster (en güçlü 12)
+  const komutBaglantilari = guclu
+    .filter((g) => g.action.startsWith("cmd:"))
+    .sort((a, b) => b.w - a.w)
+    .slice(0, 12);
+
   return (
     <div className="kart">
       <h2>Beyin<span className="yan">{b.baglanti} bağlantı</span></h2>
       <Spark ad="sıkılma (S) — son ~150 learn" seri={s.S} renk="#b18cff" />
       <Spark ad="enerji (E)" seri={s.E} renk="#3ddc84" />
       <Spark ad="ödül (R)" seri={s.R} renk="#4ea1ff" />
-      <table>
-        <thead><tr><th>en güçlü bağlantılar</th><th className="sag">w</th></tr></thead>
+
+      {/* Eylem türü dağılımı */}
+      <div className="istat" style={{ marginTop: 8 }}>
+        {Object.entries(gruplara).map(([tur, liste]) => (
+          <div key={tur} style={{ display: "inline-block", marginRight: 12 }}>
+            <div className="sayi" style={{ fontSize: 14 }}>
+              {liste.length}
+            </div>
+            <div className="alt" style={{ fontSize: 10 }}>{tur}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Komut bağlantıları (hangi stim hangi komutu çağırır) */}
+      {komutBaglantilari.length > 0 && (
+        <>
+          <div className="not11 soluk" style={{ marginTop: 8 }}>
+            komut bağlantıları (stim → cmd:)
+          </div>
+          <table style={{ marginTop: 4 }}>
+            <thead>
+              <tr><th>uyaran (stim)</th><th className="sag">komut</th>
+                <th className="sag">w</th></tr>
+            </thead>
+            <tbody>
+              {komutBaglantilari.map((g, i) => (
+                <tr key={i}>
+                  <td><span className="kisa" title={g.stim}>{g.stim}</span></td>
+                  <td className="sag">{g.action}</td>
+                  <td className="sag">{g.w}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="not11 soluk" style={{ marginTop: 4 }}>
+            komut bağlantıları: organizma hangi durumda hangi komutu
+            çağırmayı öğreniyor.
+          </div>
+        </>
+      )}
+
+      {/* Genel en güçlü bağlantılar */}
+      <div className="not11 soluk" style={{ marginTop: 8 }}>
+        genel en güçlü bağlantılar
+      </div>
+      <table style={{ marginTop: 4 }}>
+        <thead><tr><th>uyaran → eylem</th><th className="sag">w</th></tr></thead>
         <tbody>
-          {b.guclu.map((g, i) => (
+          {guclu.slice(0, 8).map((g, i) => (
             <tr key={i}>
               <td><span className="kisa" title={g.stim}>{g.stim}</span>
                 {" → "}<b>{g.action}</b></td>
@@ -210,7 +544,6 @@ export function Beyin({ d }) {
     </div>
   );
 }
-
 // ---------- uyku ----------
 export function Uyku({ d }) {
   const olaylar = d.uyku || [];
@@ -415,13 +748,18 @@ export function Kapi() {
   const [gorev, setGorev] = useState("");
   const [serbest, setSerbest] = useState("");
   const [cevap, setCevap] = useState(null);
+  const [yukleniyor, setYukleniyor] = useState(false);
 
   async function gonder(msg) {
+    setYukleniyor(true);
+    setCevap(null);
     try {
       const r = await post("/door", { msg });
       setCevap(r);
     } catch (e) {
       setCevap({ ok: false, hata: String(e) });
+    } finally {
+      setYukleniyor(false);
     }
   }
 
@@ -432,11 +770,12 @@ export function Kapi() {
       <div className="satir">
         <input style={{ maxWidth: 90 }} value={shock}
           onChange={(e) => setShock(e.target.value)} placeholder="şok" />
-        <button className="dgm tehlike"
-          onClick={() => gonder("shock:" + (shock || "50"))}>şok ver</button>
+        <button className="dgm tehlike" disabled={yukleniyor}
+          onClick={() => gonder("shock:" + (shock || "50"))}>
+          {yukleniyor ? "…" : "şok ver"}</button>
         <input value={gorev} onChange={(e) => setGorev(e.target.value)}
           placeholder="gorev: /klasor/yolu" />
-        <button className="dgm"
+        <button className="dgm" disabled={yukleniyor}
           onClick={() => gorev && gonder("gorev:" + gorev)}>
           görev ver</button>
       </div>
@@ -449,10 +788,10 @@ export function Kapi() {
               setSerbest("");
             }
           }} />
-        <button className="dgm" onClick={() => {
+        <button className="dgm" disabled={yukleniyor} onClick={() => {
           if (serbest.trim()) { gonder(serbest.trim()); setSerbest(""); }
         }}>çal</button>
-        <button className="dgm" onClick={() => gonder("ac")}>
+        <button className="dgm" disabled={yukleniyor} onClick={() => gonder("ac")}>
           kutu açtır</button>
       </div>
       <div className="not11 soluk">
@@ -460,9 +799,11 @@ export function Kapi() {
         misyonu · ac: bir kutu açtır (damak ölçümü)
       </div>
       {cevap && (
-        <pre className="kutu">{cevap.ok
-          ? JSON.stringify(cevap.durum || cevap.cevap, null, 1).slice(0, 600)
-          : "KAPI YOK: " + (cevap.cevap || "?")}</pre>
+        <div className={"not11 " + (cevap.ok ? "ok" : "hata")}>
+          {cevap.ok
+            ? "✓ " + (typeof cevap.durum === "object" ? JSON.stringify(cevap.durum) : cevap.durum || cevap.cevap || "cevap yok")
+            : "✗ " + (cevap.hata || "bilinmeyen hata")}
+        </div>
       )}
     </div>
   );
@@ -527,6 +868,7 @@ export function Atolye({ d }) {
 export function Ag({ d }) {
   if (!d || !d.ag) return null;
   const a = d.ag, k = a.kapsam;
+  const b = d.ag_beyin;
   const renk = (o) => (o > 0.8 ? "var(--yesil)"
     : o > 0.5 ? "var(--sari)" : "var(--kirmizi)");
   return (
@@ -538,6 +880,10 @@ export function Ag({ d }) {
             : "kanıt yok"}
         </span>
       </h2>
+      <div className="not11 soluk">
+        Başarı oranı yalnızca hedefe uygun ağ komutlarını içerir
+        (nmap, ping, ip, traceroute, ss, curl).
+      </div>
       <div className="chips">
         <span className={"rozet " + (k ? (k.acik ? "ok" : "kotu") : "uyari")}>
           kapsam {k ? (k.acik ? "açık" : "kapalı") : "?"}
@@ -571,20 +917,189 @@ export function Ag({ d }) {
         </div>
       )}
       <div className="akis-kisa">
-        {a.son.map((m, i) => (
-          <div key={i}
-            className={"satir-olay " + (m.duraklama ? "k-duraklama" : "k-kullan")}>
-            <span className="saat">{saat(m.t)}</span>
-            <span className="tur">{m.komut || "?"}</span>
+        {a.son.length > 0 ? (
+          <div key="son"
+            className={"satir-olay " + (a.son[0].duraklama ? "k-duraklama" : "k-kullan")}>
+            <span className="saat">{saat(a.son[0].t)}</span>
+            <span className="tur">{a.son[0].komut || "?"}</span>
             <span className="metin">
-              {m.duraklama
-                ? `${m.hedef} 3'te takıldı (deneme ${m.deneme}) — ölü kapı adayı`
-                : `${m.hedef} ${m.dogru ? "✓" : "✗"} · deneme ${m.deneme}`}
+              {a.son[0].duraklama
+                ? `${a.son[0].hedef} 3'te takıldı (deneme ${a.son[0].deneme}) — ölü kapı adayı`
+                : `${a.son[0].hedef} ${a.son[0].dogru ? "✓" : "✗"} · deneme ${a.son[0].deneme}`}
+              {a.son[0].calisti === false ? " · çalıştırılmadı" : ""}
+              {a.son[0].obs ? ` · ${String(a.son[0].obs).slice(0, 90)}` : ""}
             </span>
           </div>
-        ))}
-        {!a.son.length && <div className="not11 soluk">deneme yok</div>}
+        ) : <div className="not11 soluk">deneme yok</div>}
       </div>
+      {(a.diger || []).length > 0 && (
+        <>
+          <div className="not11 soluk" style={{ marginTop: 8 }}>
+            Ağ hedefinde denenmiş, ağ kapısı olmayan komutlar — ağ oranına
+            katılmaz
+          </div>
+          <div className="chips">
+            {a.diger.map((v) => (
+              <span key={v.komut} className="chip">
+                {v.komut}: {v.ok}/{v.n} (%{yuzde(v.oran)})
+              </span>
+            ))}
+          </div>
+          {(a.sonDiger || []).map((m, i) => (
+            <div key={i} className="not11 soluk">
+              {m.komut} ({m.hedef}) — {m.calisti !== true
+                ? "bu hedefin ağ haritasında yok; çalıştırılmadı, çıktı oluşmadı"
+                : m.obs || "eski günlük kaydında sonuç özeti yok"}
+            </div>
+          ))}
+        </>
+      )}
+      <h3 style={{ marginTop: 12 }}>Öğrenen yerel envanter</h3>
+      {b ? (
+        <>
+          <div className="chips">
+            <span className="rozet">
+              son 24 saatte {b.schedule.attempts_in_24h}/
+              {b.schedule.limit_per_24h} tarama denemesi
+            </span>
+            <span className="rozet">
+              cihaz {b.online_count} çevrimiçi / son {Math.min(b.device_count, 20)} gösteriliyor ({b.device_count} toplam)
+            </span>
+            <span className="rozet">
+              sonraki tarama {sure(b.schedule.next_in_seconds)}
+            </span>
+            {b.last_scan && (
+              <span className={"rozet " + (b.last_scan.ok ? "ok" : "uyari")}>
+                son deneme {saat(b.last_scan.t)}
+                {b.last_scan.probe ? ` · seçilen: ${b.last_scan.probe}` : ""}
+                {Number.isFinite(b.last_scan.probe_reward)
+                  ? ` · yeni kanıt ödülü ${b.last_scan.probe_reward}` : ""}
+                {!b.last_scan.ok && b.last_scan.reason
+                  ? ` · ${b.last_scan.reason}` : ""}
+              </span>
+            )}
+          </div>
+          {Object.keys(b.probe_learning || {}).length > 0 && (
+            <div className="soluk">
+              Keşif yöntemi seçimi, her yöntemin geçmişte getirdiği yeni
+              cihaz/port/servis kanıtlarına göre öğreniliyor:
+              {" "}{Object.entries(b.probe_learning).map(([name, stats]) => (
+                `${name} ${stats.attempts} deneme · ödül ${stats.reward_total}`
+              )).join(" | ")}
+            </div>
+          )}
+          {Object.keys(b.skills || {}).length > 0 && (
+            <div className="soluk">
+              Beceri doğrulaması:
+              {" "}{Object.entries(b.skills).map(([name, skill]) => (
+                `${name} ${skill.successes || 0}/${skill.attempts || 0} `
+                + `(%${Math.round((skill.confidence || 0) * 100)})`
+              )).join(" · ")}
+            </div>
+          )}
+          {b.social_learning?.enabled && (
+            <div className="soluk">
+              Yerel sosyal öğrenme açık · kimlik {b.social_learning.instance_id}
+              {" · "}eşler {(b.social_learning.peers || []).join(", ") || "yok"}
+              {" · "}alınan kanıt {b.social_learning.reports_received || 0}
+            </div>
+          )}
+          {b.devices.length ? b.devices.slice(0, 20).map((device) => (
+            <div className="not11" key={device.ip} style={{ marginTop: 8 }}>
+              <strong>{device.ip}</strong>
+              {device.hostname && (
+                <span> · {device.hostname}</span>
+              )}
+              <span className="soluk">
+                {" · "}{device.online ? "yanıt verdi" : "son taramada görülmedi"}
+                {" · "}{device.seen_count} gözlem
+              </span>
+              {device.services.length > 0 && (
+                <div className="chips">
+                  {device.services.map((service) => (
+                    <span className="chip" key={service.type}>
+                      {service.type}{service.instance
+                        ? ` · ${service.instance}` : ""}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {device.hints.length > 0 && (
+                <div className="chips">
+                  {device.hints.map((hint) => (
+                    <span className="chip" key={hint}>olası: {hint}</span>
+                  ))}
+                </div>
+              )}
+              {device.ports.length > 0 ? device.ports.map((port) => (
+                <div className="soluk" key={port.port}>
+                  {port.port} · {port.name}: {port.purpose}
+                  {" · "}{port.seen_count} gözlem
+                </div>
+              )) : <div className="soluk">bilinen açık TCP portu yok</div>}
+              <div className="soluk">{device.classification_note}</div>
+            </div>
+          )) : (
+            <div className="not11 soluk">
+              Henüz ağ cihazı gözlemi yok; ilk sınırlı yerel keşif bekleniyor.
+            </div>
+          )}
+          {b.devices.length > 20 && (
+            <div className="not11 soluk" style={{ marginTop: 6 }}>
+              {b.devices.length - 20} daha eski cihaz gizlendi (son 20 gösteriliyor).
+            </div>
+          )}
+          <details style={{ marginTop: 8 }}>
+            <summary>Ağ araçları ve port bilgisi belleği</summary>
+            <div className="not11 soluk">
+              Otomatik kullanım yerel host keşfi ve öğrenerek seçilen sınırlı
+              TCP port kontrolü, mDNS duyurusu veya pasif komşu tablosu
+              gözlemiyle sınırlıdır. Metasploit veritabanı sorguları yalnızca
+              bilgi belleğinde bulunur; modül çalıştırılmaz.
+            </div>
+            {b.tools.map((tool) => (
+              <div className="soluk" key={tool.tool + tool.usage}>
+                <strong>{tool.tool}</strong>
+                {tool.usage ? ` · ${tool.usage}` : ""}
+                {" — "}{tool.purpose}
+                {" · "}{tool.mode}
+              {tool.learned_help && (
+                <div>
+                  Yerel yardım ({tool.learned_from}):{" "}
+                  {tool.learned_help.join(" · ")}
+                </div>
+              )}
+            </div>
+            ))}
+            {Object.keys(b.reference_learning || {}).length > 0 && (
+            <div className="soluk">
+              Yerel servis dosyaları:
+              {" "}{Object.entries(b.reference_learning).map(([file, info]) => (
+                `${file} (${info.entries_learned || 0} yeni ad)`
+              )).join(" · ")}
+            </div>
+            )}
+            <h4>Port sözlüğü</h4>
+            <div className="not11 soluk">
+              UDP portları bilgi amaçlıdır; otomatik tarama yalnızca belirtilen
+              sınırlı TCP portlarını kontrol eder. Porttan cihaz türü kesin
+              çıkarılamaz.
+            </div>
+            {b.port_knowledge.map((port) => (
+              <div className="soluk" key={port.port}>
+                <strong>{port.port} · {port.name}</strong>
+                {" — "}{port.purpose}
+                {port.reference_names?.length
+                  ? ` · yerel dosya adları: ${port.reference_names.join(", ")}` : ""}
+              </div>
+            ))}
+          </details>
+        </>
+      ) : (
+        <div className="not11 soluk">
+          Ağ bilgi belleği henüz oluşturulmadı.
+        </div>
+      )}
     </div>
   );
 }
@@ -822,5 +1337,323 @@ export function Akim({ olaylar, bagli }) {
   );
 }
 
+// ---------- asm öğrenme paneli ----------
+export function AsmOgren({ d }) {
+  const [durum, setDurum] = useState(null);
+  const [cikti, setCikti] = useState("");
+  const [yukleniyor, setYukleniyor] = useState(false);
+  const [mesaj, setMesaj] = useState(null);
+  const [dakika, setDakika] = useState("1");
+
+  useEffect(() => {
+    const yenile = async () => {
+      try {
+        const r = await al("/asm/durum");
+        setDurum(r);
+      } catch { /* yoksay */ }
+    };
+    yenile();
+    const i = setInterval(yenile, 15000);
+    return () => clearInterval(i);
+  }, []);
+
+  async function baslat() {
+    const dk = Math.min(Math.max(parseFloat(dakika || "1"), 0.1), 600);
+    setDakika(String(dk));
+    setYukleniyor(true);
+    setMesaj(null);
+    try {
+      const r = await post("/asm/ogren", { dakika: dk });
+      setCikti(r.cikti || "");
+      if (r.ok) {
+        const r2 = await al("/asm/durum");
+        setDurum(r2);
+        setMesaj(`✓ ${dk} dakika öğrenme tamamlandı`);
+      } else {
+        setMesaj("HATA: " + (r.cikti || r.hata));
+      }
+    } catch (e) {
+      setMesaj("HATA: " + (e?.message || e));
+    } finally {
+      setYukleniyor(false);
+    }
+  }
+
+  const say = (x) => (Number.isFinite(x) ? Math.round(x) : 0).toLocaleString("tr-TR");
+  const yuzde2 = (x) => (Number.isFinite(x) ? (x * 100).toFixed(1) : "—");
+  const renk = (o) => (o > 0.7 ? "var(--yesil)" : o > 0.4 ? "var(--sari)" : "var(--kirmizi)");
+
+  if (!durum) {
+    return (
+      <div className="kart">
+        <h2>ASM Öğrenme<span className="yan">yükleniyor…</span></h2>
+        <div className="not11 soluk">veri bekleniyor</div>
+      </div>
+    );
+  }
+
+  const son20 = durum.son_20 || {};
+
+  return (
+    <div className="kart">
+      <h2>ASM Öğrenme
+        <span className="yan">
+          {say(durum.toplam_gorev)} görev · seviye {durum.maks_seviye}
+        </span>
+      </h2>
+
+      <div className="istat">
+        <div><div className="sayi">{say(durum.toplam_gorev)}</div>
+          <div className="alt">TOPLAMLI GÖREV</div></div>
+        <div><div className="sayi">{say(durum.primtik)}</div>
+          <div className="alt">PRIMTİK (KALIP)</div></div>
+        <div><div className="sayi">{say(durum.basarisiz)}</div>
+          <div className="alt">BAŞARISIZ ÖNBELLEK</div></div>
+        <div><div className="sayi">{say(durum.baglam)}</div>
+          <div className="alt">BAĞLAM</div></div>
+      </div>
+
+      <div className="istat" style={{ marginTop: 8 }}>
+        <div><div className="sayi">{yuzde2(son20.cozulme_orani)}%</div>
+          <div className="alt">SON 20 ÇÖZÜLME ORANI</div></div>
+        <div><div className="sayi">{say(son20.ort_deneme)}</div>
+          <div className="alt">ORT. DENEME</div></div>
+      </div>
+
+      <div style={{ marginTop: 8 }}>
+        <Cubuk etiket="Çözüm Oranı" deger={son20.cozulme_orani || 0}
+          maks={1} renk={renk(son20.cozulme_orani || 0)}
+          sag={`${yuzde2(son20.cozulme_orani)}%`} />
+      </div>
+
+      <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <input type="number" value={dakika} min="0.1" max="600" step="0.1"
+          onChange={(e) => setDakika(e.target.value)}
+          style={{ width: 70, padding: 4 }} />
+        <span className="not11 soluk">dakika</span>
+        <button className="dgm" disabled={yukleniyor}
+          onClick={baslat}>
+          {yukleniyor ? "Çalışıyor…" : "Öğren Başlat"}
+        </button>
+        {mesaj && <span className={"not11 " + (mesaj.startsWith("✓") ? "ok" : "hata")} style={{ marginLeft: 8 }}>{mesaj}</span>}
+      </div>
+
+      {cikti && (
+        <div className="not11 soluk" style={{ marginTop: 8, whiteSpace: "pre-wrap", fontSize: 12 }}>
+          {cikti.slice(0, 2000)}
+        </div>
+      )}
+    </div>
+  );
+}
 
 
+// ---------- kod düzenleme durumu paneli ----------
+
+export function KodDurum({ d }) {
+  const [kayitlar, setKayitlar] = useState([]);
+  const [yukleniyor, setYukleniyor] = useState(true);
+
+  useEffect(() => {
+    al("/kod-durum")
+      .then((r) => setKayitlar(r.kayitlar || []))
+      .catch(() => setKayitlar([]))
+      .finally(() => setYukleniyor(false));
+  }, []);
+
+  const renk = (kind) =>
+    kind === "kod_duzenle_gerialindi" ? "var(--kirmizi)" : "var(--yesil)";
+
+  if (yukleniyor) {
+    return (
+      <div className="kart">
+        <h2>Kod Düzenleme<span className="yan">yükleniyor…</span></h2>
+        <div className="not11 soluk">veri bekleniyor</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="kart">
+      <h2>Kod Düzenleme (Aşama 4)
+        <span className="yan">
+          {kayitlar.length} kayıt
+        </span>
+      </h2>
+      {kayitlar.length === 0 ? (
+        <div className="not11 soluk">henüz kod düzenlemesi yapılmadı</div>
+      ) : (
+        <table className="kod-tablo">
+          <thead>
+            <tr>
+              <th>Zaman</th>
+              <th>Dosya</th>
+              <th>Önceki</th>
+              <th>Yeni</th>
+              <th>Durum</th>
+            </tr>
+          </thead>
+          <tbody>
+            {kayitlar.map((k, i) => (
+              <tr key={i}>
+                <td>{saat(k.t)}</td>
+                <td>{k.dosya}</td>
+                <td>{k.onceki_bayt ?? "—"}</td>
+                <td>{k.yeni_bayt ?? "—"}</td>
+                <td>
+                  <span
+                    className="rozet"
+                    style={{ color: renk(k.kind), fontWeight: "bold" }}
+                  >
+                    {k.kind === "kod_duzenle_gerialindi"
+                      ? "GERİ YÜKLENDİ"
+                      : k.mesaj || "başarılı"}
+                  </span>
+                  {k.hata && (
+                    <span className="not11 soluk" style={{ fontSize: 10 }}>
+                      · {k.hata.slice(0, 60)}
+                    </span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+// ---------- hata sınıflandırması (Faz 1) ----------
+
+export function Hatalar({ d }) {
+  const hatalar = d.hatalar || [];
+  if (!hatalar.length) {
+    return (
+      <div className="kart">
+        <h2>Hata Sınıflandırması</h2>
+        <div className="not11 soluk">henüz hata kaydı yok</div>
+      </div>
+    );
+  }
+  return (
+    <div className="kart">
+      <h2>Hata Sınıflandırması</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>tür</th><th className="sag">odul</th>
+            <th className="sag">guven</th><th className="sag">eylem</th>
+          </tr>
+        </thead>
+        <tbody>
+          {hatalar.slice().reverse().map((h, i) => (
+            <tr key={i}>
+              <td>
+                <b>{h.tur}</b> <span className="not11 soluk">{saat(h.t)}</span>
+              </td>
+              <td className="sag">{h.odul != null ? h.odul.toFixed(2) : "—"}</td>
+              <td className="sag">{h.guven != null ? h.guven.toFixed(2) : "—"}</td>
+              <td className="sag">{h.eylem}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ---------- karar neden / kanıt (Faz 5) ----------
+
+export function Neden({ d }) {
+  const kayitlar = d.neden || [];
+  if (!kayitlar.length) {
+    return (
+      <div className="kart">
+        <h2>Neden / Kanıt</h2>
+        <div className="not11 soluk">henüz karar kaydı yok</div>
+      </div>
+    );
+  }
+  return (
+    <div className="kart">
+      <h2>Neden / Kanıt</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>eylem</th><th className="sag">guven</th>
+            <th className="sag">tehlike</th><th>ozellikler</th>
+          </tr>
+        </thead>
+        <tbody>
+          {kayitlar.slice().reverse().map((k, i) => (
+            <tr key={i}>
+              <td>
+                <b>{k.eylem}</b>
+                <span className="not11 soluk">{saat(k.t)}</span>
+              </td>
+              <td className="sag">{k.guven != null ? k.guven.toFixed(2) : "—"}</td>
+              <td className="sag">
+                {k.tehlike_olasiligi != null
+                  ? (k.tehlike_olasiligi * 100).toFixed(0) + "%"
+                  : "—"}
+              </td>
+              <td className="sag">
+                {(k.ozellik_katkilari || []).slice(0, 3).map((ok, j) => (
+                  <span key={j}>
+                    {ok.ozellik}={ok.agirlik.toFixed(2)}
+                    {j < 2 ? " · " : ""}
+                  </span>
+                ))}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ---------- dışsal geri bildirim (Faz 7) ----------
+
+export function DisSal({ d }) {
+  const kayitlar = d.disSal || [];
+  if (!kayitlar.length) {
+    return (
+      <div className="kart">
+        <h2>Dışsal Geri Bildirim</h2>
+        <div className="not11 soluk">henüz geri bildirim yok</div>
+      </div>
+    );
+  }
+  const iyi = kayitlar.filter((k) => k.deger === "iyi").length;
+  const kotu = kayitlar.filter((k) => k.deger === "kotu").length;
+  return (
+    <div className="kart">
+      <h2>Dışsal Geri Bildirim</h2>
+      <div className="istat">
+        <div>
+          <div className="sayi">{iyi}</div>
+          <div className="alt">İYİ</div>
+        </div>
+        <div>
+          <div className="sayi">{kotu}</div>
+          <div className="alt">KOTU</div>
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr><th>değer</th><th className="sag">zaman</th></tr>
+        </thead>
+        <tbody>
+          {kayitlar.slice().reverse().map((k, i) => (
+            <tr key={i}>
+              <td><b>{k.deger}</b></td>
+              <td className="sag">{saat(k.t)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}

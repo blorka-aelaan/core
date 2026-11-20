@@ -84,11 +84,11 @@ class Katalog:
     def __init__(self, yol, saat=None, salt_okunur=False):
         """`salt_okunur=True` ÇALIŞAN organizmanın veritabanını bozamaz.
 
-        ÖNEMLİ: yazma kipiyle açılan ikinci bir bağlantı, temiz kapandığında
-        `-wal`/`-shm` dosyalarını SİLER; çalışan sürecin açık tuttuğu
-        tanıtıcılar sahipsiz (unlinked) inode'a düşer ve o andan itibaren
-        o sürecin yazdıkları görünmez olur. Analiz/ölçüm araçları (eğitim,
-        rapor) bu yüzden daima salt okunur açmalı — ya da bir kopyayı.
+        Analiz/ölçüm araçları (eğitim, rapor) canlı veritabanına yazmamalı;
+        WAL kipinde salt okunur açılmalı veya tutarlı bir kopya kullanmalı.
+        WAL ve SHM dosyaları son bağlantı kapandığında SQLite tarafından
+        temizlenebilir; çalışan bağlantı varken salt okunur araçlar bunları
+        silmez.
         """
         self.yol = str(yol)
         self.saat = saat or (lambda: round(time.time(), 3))
@@ -100,14 +100,16 @@ class Katalog:
             self.db = sqlite3.connect("file:%s?mode=ro" % self.yol,
                                       uri=True, timeout=15)
         else:
-            self.db = sqlite3.connect(self.yol, timeout=15)
+            self.db = sqlite3.connect(self.yol, timeout=30)
+            self.db.execute("PRAGMA busy_timeout=30000")
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.execute("PRAGMA synchronous=NORMAL")
             for sql in SEMA:
                 try:
                     self.db.execute(sql)
-                except sqlite3.OperationalError:
-                    pass          # ALTER TABLE: sütun zaten vardı
+                except sqlite3.OperationalError as hata:
+                    if "duplicate column name" not in str(hata).lower():
+                        raise
             self.db.commit()
 
     def kapat(self):
@@ -116,6 +118,25 @@ class Katalog:
             self.db.close()
         except sqlite3.Error:
             pass
+
+    def _kaliteli_yaz(self, islem, adi="yazma"):
+        """`islem()` çağrısını 'database is locked' karşısında yeniden dener.
+
+        Geçici yazıcı çakışmalarında aynı bağlantı ve WAL korunur. Başarısız
+        işlem geri alınır; canlı bağlantıyı kapatıp açmak başka bir
+        organizmanın yazılarını kaybettirebilir.
+        """
+        for deneme in range(6):
+            try:
+                return islem()
+            except sqlite3.OperationalError as hata:
+                msg = str(hata).lower()
+                if "locked" not in msg and "busy" not in msg:
+                    raise
+                if deneme == 5:
+                    raise
+                self.db.rollback()
+                time.sleep(0.1 * (2 ** deneme))
 
     # ---------- yazma ----------
 
@@ -139,27 +160,29 @@ class Katalog:
         ad = yol.rsplit("/", 1)[-1] or "/"
         derinlik = yol.count("/")
         t = self.saat()
-        onceki = self.db.execute(
-            "SELECT karakter FROM klasor WHERE yol=?", (yol,)).fetchone()
-        if goc:
-            self.db.execute(
-                """INSERT INTO klasor(yol,ad,derinlik,dosya,karakter,ilk,
-                                     son,sayac,durum)
-                   VALUES(?,?,?,?,?,?,?,1,?)
-                   ON CONFLICT(yol) DO NOTHING""",
-                (yol, ad, derinlik, dosya, karakter, t, t, durum))
-        else:
-            self.db.execute(
-                """INSERT INTO klasor(yol,ad,derinlik,dosya,karakter,ilk,
-                                     son,sayac,durum)
-                   VALUES(?,?,?,?,?,?,?,1,?)
-                   ON CONFLICT(yol) DO UPDATE SET
-                     dosya=excluded.dosya, karakter=excluded.karakter,
-                     son=excluded.son, sayac=klasor.sayac+1,
-                     durum=excluded.durum""",
-                (yol, ad, derinlik, dosya, karakter, t, t, durum))
-        self.db.commit()
-        return onceki is None, (onceki[0] if onceki else 0)
+        def _yaz():
+            onceki = self.db.execute(
+                "SELECT karakter FROM klasor WHERE yol=?", (yol,)).fetchone()
+            if goc:
+                self.db.execute(
+                    """INSERT INTO klasor(yol,ad,derinlik,dosya,karakter,ilk,
+                                         son,sayac,durum)
+                           VALUES(?,?,?,?,?,?,?,1,?)
+                           ON CONFLICT(yol) DO NOTHING""",
+                    (yol, ad, derinlik, dosya, karakter, t, t, durum))
+            else:
+                self.db.execute(
+                    """INSERT INTO klasor(yol,ad,derinlik,dosya,karakter,ilk,
+                                         son,sayac,durum)
+                           VALUES(?,?,?,?,?,?,?,1,?)
+                           ON CONFLICT(yol) DO UPDATE SET
+                            dosya=excluded.dosya, karakter=excluded.karakter,
+                            son=excluded.son, sayac=klasor.sayac+1,
+                            durum=excluded.durum""",
+                    (yol, ad, derinlik, dosya, karakter, t, t, durum))
+            self.db.commit()
+            return onceki is None, (onceki[0] if onceki else 0)
+        return self._kaliteli_yaz(_yaz)
 
     def erisilemezler(self):
         return [r[0] for r in self.db.execute(
@@ -234,9 +257,11 @@ class Katalog:
                                      THEN excluded.shebang
                                      ELSE dosya.shebang END,
                        son=excluded.son, sayac=dosya.sayac+1"""
-        self.db.executemany(sql, satir)
-        self.db.commit()
-        return self.dosya_sayisi() - once
+        def _yaz():
+            self.db.executemany(sql, satir)
+            self.db.commit()
+            return self.dosya_sayisi() - once
+        return self._kaliteli_yaz(_yaz)
 
     @staticmethod
     def _yurutulebilir(yol, boyut, mod):
@@ -357,11 +382,16 @@ class Katalog:
                         r = json.loads(satir)
                     except ValueError:
                         continue
-                    yeni, _ = self.klasor_yaz(r.get("klasor", ""),
-                                             int(r.get("dosya", 0)),
-                                             int(r.get("karakter", 0)),
-                                             goc=True)
-                    k += 1 if yeni else 0
+                    try:
+                        yeni, _ = self.klasor_yaz(r.get("klasor", ""),
+                                                 int(r.get("dosya", 0)),
+                                                 int(r.get("karakter", 0)),
+                                                 goc=True)
+                        k += 1 if yeni else 0
+                    except sqlite3.OperationalError:
+                        # Göç idempotent: tek bir satır kilitliyse atla,
+                        # sonraki başlatmada tekrar denenir.
+                        continue
         except OSError:
             pass
         toplu = []
@@ -563,4 +593,3 @@ if __name__ == "__main__":
           (s["klasor"], s["dosya"], s["karakter"]))
     print("en büyük: %s" % (s["en_buyuk"],))
     print("uzantılar: %s" % (s["uzantilar"],))
-

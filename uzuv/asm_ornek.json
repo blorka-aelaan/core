@@ -1,0 +1,12 @@
+{
+  "training": [
+    {"input": {"rax": 3,  "rbx": 4},  "output": {"rax": 7}},
+    {"input": {"rax": 10, "rbx": 25}, "output": {"rax": 35}},
+    {"input": {"rax": 0,  "rbx": 9},  "output": {"rax": 9}},
+    {"input": {"rax": 100, "rbx": 1}, "output": {"rax": 101}}
+  ],
+  "validation": [
+    {"input": {"rax": 41, "rbx": 17}, "output": {"rax": 58}},
+    {"input": {"rax": 7,  "rbx": 0},  "output": {"rax": 7}}
+  ]
+}

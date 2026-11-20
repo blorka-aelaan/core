@@ -1,162 +1,290 @@
-"""dusunme.py — Model Tabanlı "Düşünme" (Eylemöncesi Simülasyon).
+"""dusunme.py — deneyimlerden tek-adımlı ödül tahmini.
 
-Organizmaya eylemi gerçekleştirmeden önce sonucunu tahmin edebilme
-kanı sağlar: mevcut durumu al, olası eylemleri birer adım iç ileri
-simüle et, en yüksek tahmini ödülü vereni seç, sonra gerçek dünyada
-uygula.
-
-Altyapı olarak NumPy tabanlı MLP kullanılır zaten `ust_beyn.py`'de:
-  SINYAL_BOYUT=36 → GIZLI_BOYUT=16 → CIKIS_BOYUT=7 (komutlar).
-
-Bu modül, MLP'yi "world model" olarak kullanır:
-  (sinyal_vektörü, eylem) → (sonraki_sinyal, tahmini_ödül)
-
-Düşünme algoritması:
-  1. Mevcut sinyali al
-  2. Her seçilebilir eylemin (feasible) tahmini:
-     a. MLP ile forward: (sinyal, eylem_one_hot) → (logits, a1, z1)
-     b. Logitları softmax yap → ihtimal dağılımı
-     c. Tahmini sonraki sinyal ve tahmini ödül
-  3. En yüksek tahmini ödülü vereni seçenek olarak değerlendir
-  4. Seçilen eylemi gerçek dünyada uygula
-
-Sınırlamalar:
-  - Tek adım içeri simülasyon (1 tick ileriye)
-  - MLP çıkısı (7 komut) ve ödül bileşik tek bileşenli
-  - Gerçek dünya fizigi (enerji/acılık değişimi) tahmin edilmez,
-    sadece model içindeki ağırlıklar yansıtır
+Her eylemden sonraki gerçek ödülü kaydeder; benzer durumlarda aday
+eylemlerin beklenen ödülünü tahmin eder. Tahminler yalnızca tanılama ve
+ölçüm için kullanılır; canlı kararları değiştirmez.
 """
 
-import numpy as np
+from __future__ import annotations
+
+import json
+import math
+import os
+import tempfile
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 
 class Dusunme:
-    """Düşünme motoru: MLP tabanlı world model."""
+    """Bağlam/eylem başına ödül ortalaması tutan açıklanabilir model.
 
-    def __init__(self, ust_beyn, sinyal_boyutu=None, gizli_boyutu=None,
-                 cikis_boyutu=None):
-        """
-        Parametreler
-        ----------
-        ust_beyn : ust_beyn_mod.UstBeyn
-            Mevcut beyinin referansı; MLP erişimi için.
-        sinyal_boyutu : int, optional
-            Sinyal vektörü boyutu (ust_beyn.SINYAL_BOYUT varsayılır).
-        gizli_boyutu : int, optional
-            Gizli nöron sayısı (ust_beyn.GIZLI_BOYUT varsayılır).
-        cikis_boyutu : int, optional
-            Çıkış (komut) sayısı (ust_beyn.CIKIS_BOYUT varsayılır).
-        """
+    Yeni (Faz 4): durum geçiş takibi (Markov zinciri).
+    (onceki_context, eylem) çiftinden sonraki context'in dağılımını
+    kaydeder; bu sayede bir eylemin sonraki durumu tehlikeli mi tahmin
+    edilebilir.
+    """
+
+    SURUM = 2   # 2: durum geçiş takibi eklendi
+    ONSEL_GUCU = 3.0
+    ODUL_DEGISKENLIK_OLCEGI = 5.0
+    ODUL_ALT = -50.0
+    ODUL_UST = 80.0
+
+    def __init__(self, ust_beyn, path=None):
         self.ub = ust_beyn
-        self.n_in = sinyal_boyutu or getattr(ust_beyn, "SINYAL_BOYUT", 36)
-        self.n_hidden = gizli_boyutu or getattr(ust_beyn, "GIZLI_BOYUT", 16)
-        self.n_out = cikis_boyutu or getattr(ust_beyn, "CIKIS_BOYUT", 7)
+        self.path = Path(path or Path(__file__).resolve().parent
+                         / "zeka" / "dusunme.json")
+        self.baglam: Dict[Tuple[int, ...], Dict[str, dict]] = {}
+        self.eylem: Dict[str, dict] = {}
+        self.samples = 0
 
-        # MLP yapısı (ust_beyn'deki gibi paylaşıyoruz, aynı parametreler)
-        self.rng = np.random.default_rng(getattr(ust_beyn, "seed", 42))
-        self.W1 = self.rng.standard_normal((self.n_hidden, self.n_in)) * 0.4
-        self.b1 = np.zeros(self.n_hidden)
-        self.W2 = self.rng.standard_normal((self.n_out, self.n_hidden)) * 0.4
-        self.b2 = np.zeros(self.n_out)
+        # --- Yeni: durum geçiş takibi (Markov zinciri) ---
+        # (onceki_anahtar, eylem) -> { sonraki_anahtar: sayi }
+        self.gecis: Dict[Tuple[Tuple[int, ...], str], Dict[Tuple[int, ...], int]] = {}
+        # (onceki_anahtar, eylem) -> toplam geçiş sayısı
+        self.gecis_toplam: Dict[Tuple[Tuple[int, ...], str], int] = {}
 
-        # Eylem adları (ust_beyn'deki KOMUTLARla uyumlu)
-        self.KOMUTLAR = getattr(ust_beyn, "KOMUTLAR",
-                                ["yok", "acil_dinlen", "acil_yem",
-                                 "kapat_ag", "kisitla_dosya", "guvenli_mod"])
+    @staticmethod
+    def _sinirla(deger: float) -> float:
+        try:
+            return max(0.0, min(1.0, float(deger)))
+        except (ValueError, TypeError):
+            # Beklenmeyen tipte bir değer gelirse güvenli varsayılan değer dön
+            return 0.0
 
-        # Eylem one-hot encoder: eylem_adı → (n_out,) sıvı
-        self.eylem_indeksi = {k: i for i, k in enumerate(self.KOMUTLAR)}
+    @classmethod
+    def baglam_anahtari(cls, sinyal_v) -> Tuple[int, ...]:
+        """Ödül tahmini için temel yaşam/tehlike sinyallerini kovala."""
+        if len(sinyal_v) < 27:
+            raise ValueError("Sinyal vektörü en az 27 değer içermeli")
+        energy = cls._sinirla(sinyal_v[0])
+        hunger = cls._sinirla(sinyal_v[1])
+        boredom = cls._sinirla(sinyal_v[3])
+        return (
+            min(3, int(energy * 4)),
+            min(3, int(hunger * 4)),
+            int(cls._sinirla(sinyal_v[2]) >= 0.5),
+            min(2, int(boredom * 3)),
+            int(cls._sinirla(sinyal_v[4]) >= 0.5),
+            int(cls._sinirla(sinyal_v[20]) >= 0.5),
+            int(cls._sinirla(sinyal_v[21]) >= 0.5),
+            int(cls._sinirla(sinyal_v[26]) >= 0.5),
+        )
 
-    def _one_hot_eylem(self, eylem_adi):
-        """Eylem adını one-hot vektöre çevirir."""
-        idx = self.eylem_indeksi.get(eylem_adi, 0)
-        v = np.zeros(self.n_out)
-        v[idx] = 1.0
-        return v
+    @staticmethod
+    def _ekle(istatistik: dict, odul: float) -> None:
+        n = int(istatistik.get("n", 0)) + 1
+        ort = float(istatistik.get("ortalama", 0.0))
+        m2 = float(istatistik.get("m2", 0.0))
+        delta = odul - ort
+        ort += delta / n
+        m2 += delta * (odul - ort)
+        istatistik.update(n=n, ortalama=ort, m2=m2)
 
-    def tahmin(self, sinyal_v, eylem_adi):
+    def observe(self, sinyal_v, eylem: str, gercek_odul: float) -> None:
+        """Gerçekleşmiş eylem sonucunu modele ekle."""
+        if not isinstance(eylem, str) or not eylem:
+            raise ValueError("Eylem boş olmayan bir metin olmalı")
+        odul = float(gercek_odul)
+        if not math.isfinite(odul):
+            raise ValueError("Ödül sonlu bir sayı olmalı")
+        odul = max(self.ODUL_ALT, min(self.ODUL_UST, odul))
+        anahtar = self.baglam_anahtari(sinyal_v)
+        baglam_eylemleri = self.baglam.setdefault(anahtar, {})
+        self._ekle(baglam_eylemleri.setdefault(eylem, {}), odul)
+        self._ekle(self.eylem.setdefault(eylem, {}), odul)
+        self.samples += 1
+
+    def observe_gecis(self, onceki_sinyal_v, eylem: str, sonraki_sinyal_v) -> None:
+        """(onceki_context, eylem) -> sonraki_context geçişini kaydet.
+
+        Markov zinciri için: eylemden sonra hangi bağlama geçildiğini
+        sayar. Daha sonra tahmin_sonraki_sinyal() ile bu dağılımdan
+        en olası sonraki bağlam çıkarılır.
         """
-        (sinyal, eylem) pareti için tahmini (sonraki_sinyal, ödül).
+        onceki_anahtar = self.baglam_anahtari(onceki_sinyal_v)
+        sonraki_anahtar = self.baglam_anahtari(sonraki_sinyal_v)
+        gecis_anahtar = (onceki_anahtar, eylem)
 
-        Parametreler
-        ----------
-        sinyal_v : array-like (n_in,)
-            Mevcut sinyal vektörü.
-        eylem_adi : str
-            Tahmini yapmak istediğimiz eylem.
+        sonrakiler = self.gecis.setdefault(gecis_anahtar, {})
+        sonrakiler[sonraki_anahtar] = sonrakiler.get(sonraki_anahtar, 0) + 1
+        self.gecis_toplam[gecis_anahtar] = self.gecis_toplam.get(gecis_anahtar, 0) + 1
 
-        Dönen
-        ------
-        (sonraki_sinyal, tahmini_ödül) - her ikisi de numpy array/float.
+    def tahmin(self, sinyal_v, eylem: str) -> Tuple[None, Optional[float]]:
+        """(sonraki_durum, beklenen_ödül); bilinmeyen eylem None döner."""
+        genel = self.eylem.get(eylem)
+        if not genel:
+            return None, None
+        yerel = self.baglam.get(self.baglam_anahtari(sinyal_v), {}).get(eylem)
+        if not yerel:
+            return None, float(genel["ortalama"])
+        n = int(yerel["n"])
+        agirlik = n / (n + self.ONSEL_GUCU)
+        tahmin = (agirlik * float(yerel["ortalama"])
+                  + (1.0 - agirlik) * float(genel["ortalama"]))
+        return None, tahmin
+
+    # ------------------------------------------------- Faz 4: durum tahmini
+
+    def tahmin_sonraki_sinyal(
+        self, sinyal_v, eylem: str
+    ) -> Tuple[Optional[Tuple[int, ...]], Optional[float]]:
+        """(sonraki_context_anahtari, olasilik) döndürür.
+
+        (onceki_context, eylem) çifti için gözlenen en olası sonraki
+        bağlamı ve olasılığını döner. Geçiş yoksa (None, None).
         """
-        x = np.array(sinyal_v, dtype=float)
-        if x.shape[0] != self.n_in:
-            # Uygulamak için yeniden boyutlandırma veya hata
-            raise ValueError(
-                f"Sinyal boyutu {x.shape[0]} != {self.n_in}")
+        onceki_anahtar = self.baglam_anahtari(sinyal_v)
+        gecis_anahtar = (onceki_anahtar, eylem)
+        sonrakiler = self.gecis.get(gecis_anahtar)
+        if not sonrakiler:
+            return None, None
+        toplam = self.gecis_toplam.get(gecis_anahtar, 1)
+        en_iyi_anahtar = max(sonrakiler, key=sonrakiler.get)
+        olasilik = sonrakiler[en_iyi_anahtar] / toplam
+        return en_iyi_anahtar, round(float(olasilik), 3)
 
-        eylem_vec = self._one_hot_eylem(eylem_adi)
+    def tehlike_tahmini(
+        self, sinyal_v, eylem: str, drives
+    ) -> Tuple[Optional[float], Optional[str]]:
+        """Eylemin sonraki durumu tehlike getirecek mi tahmin et.
 
-        # Forward pass: (n_in,) -> (logits (n_out,), a1 (n_hidden,), z1 (n_hidden,))
-        a1 = np.maximum(0, np.dot(self.W1, x) + self.b1)  # gizli katman, ReLU
-        logits = np.dot(self.W2, a1) + self.b2            # çıkış katmanı
-
-        # Softmax → ihtimaller
-        exp_logits = np.exp(logits - np.max(logits))     # numerik stabilite
-        ihtimaller = exp_logits / np.sum(exp_logits)     # softmax
-
-        # Tahmini "sonraki sinyal": aynı boyuttaki ama modelin tahmini
-        # Bir şeyler için basitçe out vec'i ----> sıfır (sinyal yok),
-        # ya da modelin çıktısını kullanırız. Bu modelin amacı ödül tahmini.
-        # Elde edilen ödül = seçilen komutun softmax ihtimali
-        # (ust_beyn yöntemiyle uyumlu: negatif ödül softmax uyumlu -> 0'a doğru iter)
-
-        # Yöntem 1: Softmax olasılığının en yüksekini ödül olarak kabul et
-        tahmini_odul = float(ihtimaller.max())
-
-        # Tahmini "sonraki sinyal": modelin girdi-çıktı ilişkinin simetrisi
-        # yok; basitçe girdiyi koruyup çıkışı döndürüyoruz ama yorum olarak
-        # sadece ödül tutuyoruz.
-        sonraki_sinyal = None  # Tek adım simülasyonda tanımsız/ilgisiz
-
-        return sonraki_sinyal, tahmini_odul
-
-    def dusun_ve_sec(self, sinyal_v, feasible):
+        Döner: (tehlike_olasiligi, aciklama). Bilinmiyorsa (None, None).
+        Tehlike: sonraki bağlamın enerji kova L (düşük) veya açlık kova A
+        (yüksek) olması.
         """
-        Kullanılabilir eylemler setinden (feasible), eylem öncesi simülasyon
-        yaparak en iyi eylemi seç.
+        sonraki_anahtar, olasilik = self.tahmin_sonraki_sinyal(sinyal_v, eylem)
+        if sonraki_anahtar is None:
+            return None, None
 
-        Parametreler
-        ----------
-        sinyal_v : array-like (n_in,)
-            Mevcut sinyal vektörü.
-        feasible : list of str
-            Bu tikte yürütülebilecek eylemler listesi.
+        # sonraki_anahtar[0] = energy kova (0=L,1=M,2=H,3=critical)
+        # sonraki_anahtar[1] = hunger kova (0=T,1=O,2=A,3=kritik)
+        enerji_kova = sonraki_anahtar[0]
+        acililik_kova = sonraki_anahtar[1]
 
-        Dönen
-        ------
-        en_iyi_eylem : str
-            Tahmini ödül en yüksek olan eylem.
-        en_yuksek_tahmin : float
-            Maksimum tahmini ödül.
-        """
-        en_iyi_eylem = None
-        en_yuksek_tahmin = -float('inf')
+        tehlike = 0.0
+        nedenler = []
+        if enerji_kova == 0:  # L = düşük enerji
+            tehlike += 0.4 * olasilik
+            nedenler.append("düşük_enerji")
+        if acililik_kova >= 2:  # A = yüksek açlık
+            tehlike += 0.4 * olasilik
+            nedenler.append("yüksek_açlık")
 
-        for eylem in feasible:
-            # Sadece geçerli eylemler varsa; KOMUTLAR içinde varsayımı kontrol et
-            if eylem not in self.eylem_indeksi:
-                # Bilinmeyen eylem: ignore veya score=0
-                continue
-            _, tahmini_odul = self.tahmin(sinyal_v, eylem)
-            if tahmini_odul > en_yuksek_tahmin:
-                en_yuksek_tahmin = tahmini_odul
-                en_iyi_eylem = eylem
+        # Drives ile çapraz kontrol: şu an zaten tehlikedeyse daha ciddi
+        if getattr(drives, "in_danger", False):
+            tehlike = min(1.0, tehlike + 0.2)
+            nedenler.append("zaten_tehlikede")
 
-        # Hiçbir eylem seçilemezse None (veya fallback: "rest")
-        if en_iyi_eylem is None:
-            # Tehlikeli yoksa "rest" fallback
-            en_iyi_eylem = "rest" if "rest" in feasible else feasible[0] if feasible else None
+        tehlike = max(0.0, min(1.0, tehlike))
+        aciklama = ", ".join(nedenler) if nedenler else "tehlike_yok"
+        return round(float(tehlike), 3), aciklama
 
-        return en_iyi_eylem, en_yuksek_tahmin
+    def guven(self, sinyal_v, eylem: str) -> float:
+        """Örnek desteği ve gözlenen ödül tutarlılığından güven puanı üret."""
+        yerel = self.baglam.get(self.baglam_anahtari(sinyal_v), {}).get(eylem)
+        if not yerel:
+            return 0.0
+        n = int(yerel["n"])
+        destek = n / (n + self.ONSEL_GUCU)
+        varyans = max(0.0, float(yerel.get("m2", 0.0)) / max(1, n - 1))
+        tutarlilik = math.exp(
+            -math.sqrt(varyans) / self.ODUL_DEGISKENLIK_OLCEGI
+        )
+        return self._sinirla(destek * tutarlilik)
+
+    def dusun_ve_sec(self, sinyal_v, feasible) -> Tuple[Optional[str], Optional[float]]:
+        """Yalnızca deneyimi olan adaylar içinden en yüksek tahmini döndür."""
+        en_iyi = None
+        en_yuksek = None
+        for eylem in dict.fromkeys(feasible):
+            _, tahmin = self.tahmin(sinyal_v, eylem)
+            if tahmin is not None and (en_yuksek is None or tahmin > en_yuksek):
+                en_iyi, en_yuksek = eylem, tahmin
+        return en_iyi, en_yuksek
+
+    def save(self) -> None:
+        """Modeli atomik JSON değişimiyle kalıcılaştır."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Geçiş verisini serileştirilebilir formata çevir:
+        # ((anahtar_tuple, eylem), {sonraki_anahtar: sayi}) ->
+        # {"anahtar": [...], "eylem": "...", "sonrakiler": {"[...]": n}}
+        gecis_serial = {}
+        for (onceki_anahtar, eylem), sonrakiler in self.gecis.items():
+            gecis_key = json.dumps(
+                [list(onceki_anahtar), eylem], ensure_ascii=False
+            )
+            gecis_serial[gecis_key] = {
+                "sonrakiler": {
+                    json.dumps(list(k), ensure_ascii=False): v
+                    for k, v in sonrakiler.items()
+                },
+                "toplam": self.gecis_toplam.get((onceki_anahtar, eylem), 0),
+            }
+
+        veri = {
+            "surum": self.SURUM,
+            "samples": self.samples,
+            "eylem": self.eylem,
+            "baglam": [
+                {"anahtar": list(anahtar), "eylemler": eylemler}
+                for anahtar, eylemler in self.baglam.items()
+            ],
+            "gecis": gecis_serial,
+        }
+        fd, gecici = tempfile.mkstemp(
+            prefix=self.path.name + ".", suffix=".tmp", dir=self.path.parent
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(veri, f, ensure_ascii=False, allow_nan=False)
+                f.write("\n")
+            os.replace(gecici, self.path)
+        except BaseException:
+            try:
+                os.unlink(gecici)
+            except FileNotFoundError:
+                pass
+            raise
+
+    def load(self) -> bool:
+        """Model yoksa False; bozuk veya uyumsuz modelde açıkça hata ver."""
+        if not self.path.exists():
+            return False
+        with self.path.open(encoding="utf-8") as f:
+            veri = json.load(f)
+        if veri.get("surum") != self.SURUM:
+            # Eski sürüm model (SURUM=1): geçiş verisi yok, boş başlat
+            if veri.get("surum") == 1:
+                self.samples = int(veri.get("samples", 0))
+                self.eylem = veri.get("eylem", {})
+                self.baglam = {
+                    tuple(int(x) for x in satir["anahtar"]): satir["eylemler"]
+                    for satir in veri.get("baglam", [])
+                }
+                self.gecis = {}
+                self.gecis_toplam = {}
+                return True
+            raise ValueError("Desteklenmeyen dusunme model surumu")
+        self.samples = int(veri["samples"])
+        self.eylem = veri["eylem"]
+        self.baglam = {
+            tuple(int(x) for x in satir["anahtar"]): satir["eylemler"]
+            for satir in veri["baglam"]
+        }
+        # Geçiş verisini geri yükle
+        self.gecis = {}
+        self.gecis_toplam = {}
+        for gecis_key, veri_degeri in veri.get("gecis", {}).items():
+            parsed_key = json.loads(gecis_key)
+            onceki_anahtar = tuple(int(x) for x in parsed_key[0])
+            eylem = parsed_key[1]
+            gecis_anahtar = (onceki_anahtar, eylem)
+            sonrakiler = {}
+            for sonraki_key, sayi in veri_degeri.get("sonrakiler", {}).items():
+                sonraki_anahtar = tuple(int(x) for x in json.loads(sonraki_key))
+                sonrakiler[sonraki_anahtar] = int(sayi)
+            self.gecis[gecis_anahtar] = sonrakiler
+            self.gecis_toplam[gecis_anahtar] = int(veri_degeri.get("toplam", 0))
+        return True
+

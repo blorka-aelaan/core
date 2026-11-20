@@ -304,6 +304,95 @@ async function rota(req, res) {
       { ok: r.kod === 0, not: plan.not, cikti: r.cikti.slice(0, 500) });
   }
 
+  if (mt === "GET" && y === "/asm/durum") {
+    // Assembly öğrenme durumu (uzuv/asm_ogren.json) — salt okuma.
+    const p = path.join(ROOT, "uzuv", "asm_ogren.json");
+    try {
+      const veri = JSON.parse(fs.readFileSync(p, "utf8"));
+      const bagil = veri.bagil || {};
+      const primler = veri.primler || {};
+      const gecis = veri.gecmis || [];
+      const son = gecis.slice(-20);
+      const cozulen = son.filter((g) => g.cozuldu).length;
+      const ortDeneme = cozulen
+        ? son.filter((g) => g.cozuldu).reduce((s, g) => s + g.deneme, 0) / cozulen
+        : 0;
+      const toplamPrim = Object.values(primler).reduce((s, v) => s + v.length, 0);
+      let toplamBasarisiz = 0;
+      for (const ctx of Object.values(veri.failures || {})) {
+        toplamBasarisiz += ctx.length;
+      }
+      return json(res, 200, {
+        toplam_gorev: veri.toplam_gorev ?? 0,
+        maks_seviye: veri.maks_seviye ?? 1,
+        primtik: toplamPrim,
+        basarisiz: toplamBasarisiz,
+        baglam: Object.keys(bagil).length,
+        son_20: {
+          cozulme_orani: son.length ? cozulen / son.length : 0,
+          ort_deneme: ortDeneme,
+        },
+      });
+    } catch {
+      return json(res, 200, {
+        toplam_gorev: 0,
+        maks_seviye: 1,
+        primtik: 0,
+        basarisiz: 0,
+        baglam: 0,
+        son_20: { cozulme_orani: 0, ort_deneme: 0 },
+      });
+    }
+  }
+
+  if (mt === "GET" && y === "/kod-durum") {
+    if (!yetkiVar(req)) return yetkisiz(res);
+    // journal.jsonl'deki kod_duzenle / kod_duzenle_gerialindi kayıtlarını oku
+    const p = path.join(ROOT, "journal.jsonl");
+    let kayitlar = [];
+    try {
+      const satirlar = fs.readFileSync(p, "utf8").split("\n");
+      for (const s of satirlar) {
+        if (!s.trim()) continue;
+        try {
+          const k = JSON.parse(s);
+          if (k.kind === "kod_duzenle" || k.kind === "kod_duzenle_gerialindi") {
+            kayitlar.push({
+              t: k.t,
+              kind: k.kind,
+              dosya: k.dosya,
+              onceki_bayt: k.onceki_bayt,
+              yeni_bayt: k.yeni_bayt,
+              mesaj: k.mesaj || (k.kind === "kod_duzenle_gerialindi" ? "gerçekleştirildi" : "başarılı"),
+              hata: k.hata || null,
+            });
+          }
+        } catch { /* yoksay */ }
+      }
+    } catch { /* journal yok */ }
+    // en yeni 30, yeni→eski sıralı
+    kayitlar.sort((a, b) => b.t - a.t);
+    return json(res, 200, { kayitlar: kayitlar.slice(0, 30) });
+  }
+
+  if (mt === "POST" && y === "/asm/ogren") {
+    if (!yetkiVar(req)) return yetkisiz(res);
+    const b = await govde(req);
+    const dakika = Math.min(Math.max(parseFloat(b?.dakika || "1"), 0.1), 600);
+    // İşlem süresi = dakika + 30 sn buffer, en az 15 dakika (SIGTERM riskini azaltır).
+    const timeoutMs = Math.max(dakika * 60000 + 30000, 900000);
+    const r = await calistir("python3", ["uzuv/asm_ogren.py", "--dakika", String(dakika)], timeoutMs);
+    let mesaj = r.cikti.slice(0, 3000);
+    if (r.kod !== 0 && r.cikti && /signal|SIGTERM|SIGKILL|timed out/i.test(r.cikti)) {
+      mesaj = "zaman aşımı: işlem " + dakika + " dakikada tamamlanamadı.";
+    }
+    return json(res, r.kod === 0 ? 200 : 500, {
+      ok: r.kod === 0,
+      dakika,
+      cikti: mesaj,
+    });
+  }
+
   if (mt === "POST" && y === "/uzuv/etiket") {
     if (!yetkiVar(req)) return yetkisiz(res);
     const b = await govde(req);

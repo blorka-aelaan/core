@@ -12,12 +12,22 @@ export const JOURNAL = path.join(ROOT, "journal.jsonl");
 const RING = 500;            // canlı akış halkası (act/learn hariç)
 const SERI = 150;            // grafik serisi uzunluğu
 const ZINCIR = new Set(["SUREC_SAY", "DOSYA_SAY"]);
+const AG_KAPILARI = {
+  AG_TARA: new Set(["cmd:nmap", "cmd:ping", "cmd:ip", "cmd:traceroute"]),
+  BENI_TARA: new Set(["cmd:nmap", "cmd:ss", "cmd:traceroute", "cmd:curl"]),
+};
+
+export function agKomutSinifi(hedef, komut) {
+  if (!Object.prototype.hasOwnProperty.call(AG_KAPILARI, hedef)
+      || !String(komut || "").startsWith("cmd:")) return null;
+  return AG_KAPILARI[hedef].has(komut) ? "ag" : "diger";
+}
 
 // Üst beyin komut sırası — ust_beyn.py KOMUTLAR ile birebir aynı.
 // (Model dosyası yalnızca indeksle ölçüm saklar; adlar burada.)
 const UST_KOMUTLAR = [
   "yok", "acil_dinlen", "acil_yem", "kapat_ag",
-  "kisitla_dosya", "guvenli_mod", "sifirla",
+  "kisitla_dosya", "guvenli_mod", "sifirla", "asm_ogren",
 ];
 
 let offset = 0;              // jurnalden okunan bayt
@@ -38,7 +48,10 @@ function sifirla() {
     },
     birak: { n: 0, deneme: {}, son: [] },
     // Ağ keşfi (AG_TARA/BENI_TARA): kapı performansı + duraklama kanıtı
-    ag: { kapi: {}, duraklama: {}, hedef: {}, son: [] },
+    ag: {
+      kapi: {}, duraklama: {}, hedef: {}, son: [],
+      diger: {}, sonDiger: [],
+    },
     // Sahne 1/2: merak ekonomisi (öz-ödül olayları + dünya sağlığı serisi)
     merak: { n: 0, odul: 0, islem: {}, son: [], seri: [] },
     // Üst beyin (ust_beyn.py): komut seçimleri, reddedilmeler, sifirla
@@ -51,14 +64,28 @@ function sifirla() {
       sonRed: [],              // son reddedilmeler
       sifirla: { n: 0, budanan: 0, links: 0, ornek: [] },
     },
-    uyku: [],                // {t, ad, veri, kod, sure, ornek}
-    hatalar: [],
-    dersIslem: [],
+    uyku: [],                // {t, ad, veri, kod, sure, ornek, soyutlasma}
+    hatalar: [],             // {t, tur, stim, eylem, odul, guven}
+    neden: [],               // {t, eylem, guven, ozellik_katkilari, gecmis_deneyim, tehlike_olasiligi}
+    disSal: [],              // {t, deger, odul} — dışsal geri bildirim
+    konsolidasyon: [],       // {t, adet} — çalışma bellek konsolidasyonu
+    ders_islem: [],          // {t, kind, hedef, yanlis, dogrusu, not_}
     uzuvSon: null,
+    evren: null,
+    surec: { ornek: 0, adet: 0, son: null },
     dogum: 0,
     sonKapanis: 0,
     sonAct: null,
     sikilma: 0,
+    // ---------- Yeni: Bu bilgisayarın bedeni (Aşama 8) ----------
+    beden: { insan_var: false, sistem_saati: 0, disk_yuzde: 0, bellek_yuzde: 0 },
+    // ---------- Yeni: USB — kernel seviyesinde (Aşama 10) ----------
+    usb: { cihaz_sayisi: 0, node_sayisi: 0, keşif_bonusu: 0 },
+    // ---------- Yeni: Ruh hali / mood vektörü (Aşama 9) ----------
+    mood: {
+      mutluluk: 0, korku: 0, guven: 0, merak: 0, sikilma: 0,
+      beden_baski: 0, dominant: "-",
+    },
     seriler: { E: [], H: [], R: [], S: [] },
     ring: [],
   };
@@ -112,15 +139,23 @@ function isle(k) {
             (u.hedef[k.hedef].baslatilan || 0) + 1;
         }
       }
-      // Ağ keşfi (AG_TARA/BENI_TARA): kapı performansı jurnal kanıtı
-      // (egit_ag.py --rapor ile aynı toplama — pano da aynı veriyi okur)
-      if (k.hedef === "AG_TARA" || k.hedef === "BENI_TARA") {
+      // Yalnızca bu hedefte tanımlı ve yargılanabilir komutlar ağ kapısıdır.
+      const agSinif = agKomutSinifi(k.hedef, k.komut);
+      if (agSinif === "ag") {
         const a = D.ag;
         ekle(a.kapi, k.komut || "?", !!k.dogru);
         ekle(a.hedef, k.hedef, !!k.dogru);
         a.son = [{ t: k.t, hedef: k.hedef, komut: k.komut,
-          dogru: !!k.dogru, deneme: k.deneme },
+          dogru: !!k.dogru, deneme: k.deneme,
+          calisti: k.calisti, obs: k.obs || "" },
           ...a.son].slice(0, 10);
+      } else if (agSinif === "diger") {
+        const a = D.ag;
+        ekle(a.diger, k.komut || "?", !!k.dogru);
+        a.sonDiger = [{ t: k.t, hedef: k.hedef, komut: k.komut,
+          dogru: !!k.dogru, deneme: k.deneme,
+          calisti: k.calisti, obs: k.obs || "" },
+          ...a.sonDiger].slice(0, 10);
       }
       u.sonKullan = [k, ...u.sonKullan].slice(0, 8);
       break;
@@ -134,12 +169,16 @@ function isle(k) {
       break;
     }
     case "kullan_duraklama": {
-      // 3 denemede karşılanamayan ağ hedefi → ölü kapı adayı kanıtı
+      // Duraklama yalnızca hedefte tanımlı bir ağ komutunda ağ kanıtıdır.
       const a = D.ag;
-      a.duraklama[k.komut || "?"] = (a.duraklama[k.komut || "?"] || 0) + 1;
-      a.son = [{ t: k.t, hedef: k.hedef, komut: k.komut,
-        deneme: k.deneme, duraklama: true },
-        ...a.son].slice(0, 10);
+      if (agKomutSinifi(k.hedef, k.komut) === "ag") {
+        a.duraklama[k.komut || "?"] =
+          (a.duraklama[k.komut || "?"] || 0) + 1;
+        a.son = [{ t: k.t, hedef: k.hedef, komut: k.komut,
+          deneme: k.deneme, duraklama: true,
+          calisti: k.calisti, obs: k.obs || "" },
+          ...a.son].slice(0, 10);
+      }
       break;
     }
     case "merak": {
@@ -157,31 +196,95 @@ function isle(k) {
     }
     case "uyku_basla":
       D.uyku.push({ t: k.t, ad: k.ad, veri: k.veri, kod: null });
-      if (D.uyku.length > 16) D.uyku.shift();
+      if (D.uyku.length > 16) D.uyku.splice(16);
       break;
     case "uyku_bitti": {
-      for (let i = D.uyku.length - 1; i >= 0; i--) {
-        const e = D.uyku[i];
-        if (e.ad === k.ad && e.kod === null) {
-          e.kod = k.kod; e.sure = k.sure; e.ornek = k.ornek;
-          break;
-        }
+      const u = D.uyku;
+      const son = u[u.length - 1];
+      if (son) {
+        son.kod = k.kod;
+        son.sure = k.sure;
+        son.ornek = k.ornek;
+        son.soyutlasma = k.soyutlasma || 0;
       }
+      D.konsolidasyon.push({ t: k.t, adet: k.soyutlasma || 0 });
+      if (D.konsolidasyon.length > 20) D.konsolidasyon.splice(20);
       break;
     }
+    case "calisma_bellek_konsolidasyon":
+      D.konsolidasyon.push({ t: k.t, adet: k.adet || 0 });
+      if (D.konsolidasyon.length > 20) D.konsolidasyon.splice(20);
+      break;
     case "hata":
-      D.hatalar = [{ t: k.t, act: k.act, err: k.err, msg: k.msg },
-        ...D.hatalar].slice(0, 8);
+      D.hatalar.push({
+        t: k.t, tur: k.tur, stim: k.stim, eylem: k.eylem,
+        odul: k.odul, guven: k.guven,
+      });
+      if (D.hatalar.length > 20) D.hatalar.splice(20);
+      break;
+    case "neden":
+      D.neden.push({
+        t: k.t, eylem: k.eylem, guven: k.guven,
+        ozellik_katkilari: k.ozellik_katkilari || [],
+        gecmis_deneyim: k.gecmis_deneyim || null,
+        dusunme_tahmini_odul: k.dusunme_tahmini_odul,
+        dusunme_guven: k.dusunme_guven,
+        tehlike_olasiligi: k.tehlike_olasiligi,
+        tehlike_aciklama: k.tehlike_aciklama,
+      });
+      if (D.neden.length > 20) D.neden.splice(20);
+      break;
+    case "door_feedback_isle":
+      D.disSal.push({ t: k.t, deger: k.deger });
+      if (D.disSal.length > 20) D.disSal.splice(20);
+      break;
+    case "learn":
+      if (typeof k.S === "number") {
+        D.sikilma = k.S;
+        seri(D.seriler.S, k.t, k.S);
+      }
+      // ---------- Yeni: Bu bilgisayarın bedeni (Aşama 8) ----------
+      if (typeof k.insan_var === "boolean") D.beden.insan_var = k.insan_var;
+      if (typeof k.sistem_saati === "number") D.beden.sistem_saati = k.sistem_saati;
+      if (typeof k.disk_yuzde === "number") D.beden.disk_yuzde = k.disk_yuzde;
+      if (typeof k.bellek_yuzde === "number") D.beden.bellek_yuzde = k.bellek_yuzde;
+      // ---------- Yeni: USB — kernel seviyesinde (Aşama 10) ----------
+      if (typeof k.usb_cihaz_sayisi === "number") D.usb.cihaz_sayisi = k.usb_cihaz_sayisi;
+      if (typeof k.usb_node_sayisi === "number") D.usb.node_sayisi = k.usb_node_sayisi;
+      if (typeof k.usb_keşif_bonusu === "number") D.usb.keşif_bonusu = k.usb_keşif_bonusu;
+      // ---------- Yeni: Ruh hali / mood vektörü (Aşama 9) ----------
+      if (typeof k.mood_mutluluk === "number") D.mood.mutluluk = k.mood_mutluluk;
+      if (typeof k.mood_korku === "number") D.mood.korku = k.mood_korku;
+      if (typeof k.mood_guven === "number") D.mood.guven = k.mood_guven;
+      if (typeof k.mood_merak === "number") D.mood.merak = k.mood_merak;
+      if (typeof k.mood_sikilma === "number") D.mood.sikilma = k.mood_sikilma;
+      if (typeof k.mood_beden_baski === "number") D.mood.beden_baski = k.mood_beden_baski;
+      if (typeof k.mood_dominant === "string") D.mood.dominant = k.mood_dominant;
       break;
     case "ders_uygulandi":
     case "ders_red":
-      D.dersIslem = [k, ...D.dersIslem].slice(0, 8);
+      D.ders_islem.push({
+        t: k.t, kind: k.kind, hedef: k.hedef,
+        yanlis: k.yanlis, dogrusu: k.dogrusu, not_: k.not_,
+      });
+      if (D.ders_islem.length > 20) D.ders_islem.splice(20);
       break;
     case "uzuv_sinif":
       D.uzuvSon = k;
       break;
     case "birth":
       D.dogum = k.t;
+      break;
+    case "home_world":
+      D.evren = k;
+      break;
+    case "surec_olcum":
+      D.surec = {
+        ...D.surec,
+        ornek: k.ornek || D.surec.ornek,
+        adet: k.surec_turu ?? D.surec.adet,
+        son: k,
+      };
       break;
     case "sleep":
       D.sonKapanis = k.t;
@@ -224,12 +327,6 @@ function isle(k) {
         ...s.ornek].slice(0, 10);
       break;
     }
-    case "learn":
-      if (typeof k.S === "number") {
-        D.sikilma = k.S;
-        seri(D.seriler.S, k.t, k.S);
-      }
-      break;
     default:
       break;
   }
@@ -340,21 +437,135 @@ export function durum() {
   const durumUzuv = jsonOk(path.join(ROOT, "zeka", "uzuv_durum.json"), null);
   const surec = jsonOk(path.join(ROOT, "zeka", "surec.json"), {});
   const damak = jsonOk(path.join(ROOT, "zeka", "damak.json"), {});
+  const agBeyin = jsonOk(path.join(ROOT, "zeka", "ag_beyin.json"), null);
+  const usbBeyin = jsonOk(path.join(ROOT, "zeka", "usb.json"), null);
+  const nnUsb = jsonOk(path.join(ROOT, "zeka", "nn_usb.json"), null);
+  const nnAg = jsonOk(path.join(ROOT, "zeka", "nn_ag.json"), null);
+  const nnAna = jsonOk(path.join(ROOT, "zeka", "nn_ana.json"), null);
   const cfg = jsonOk(path.join(ROOT, "body.json"), {});
+  const komutTehlike = jsonOk(
+    path.join(ROOT, "zeka", "komut_tehlike.json"), {});
   const kapanis = D.sonKapanis > D.dogum;
   const actT = D.sonAct?.t || 0;
 
+  const nowSec = Date.now() / 1000;
+  // Geçerli unix zamanı mı? (yaklaşık 1 milyar üzeri; 1126 gibi tik sayacı değil)
+  // Eğer tik sayacıysa (küçük pozitif sayı), eylem şimdi yapılmış sayılır.
+  const gecerliZaman = actT > 1000000000;
+  const actUnix = gecerliZaman ? actT : (actT > 0 ? nowSec : 0);
+  const sonEtkinlikS = actT > 0 ? nowSec - actUnix : null;
+  const staleSec = sonEtkinlikS == null ? Number.POSITIVE_INFINITY : sonEtkinlikS;
+  const waiting = D.toplam === 0 && !D.dogum && !D.sonAct;
+  const bozukUyari = bozuk > 0 ? [`${bozuk} bozuk satır tespit edildi`] : [];
+  const staleUyari = staleSec > 180 ? ["son etkinlik çok eski; veri stale"] : [];
+  const dogumUyari = !D.dogum && !waiting ? ["doğum bilgisi eksik"] : [];
+  const agNow = Date.now() / 1000;
+  const agScans = (agBeyin?.scans || []).filter((scan) =>
+    Number.isFinite(scan.t) && agNow - scan.t < 86400);
+  const agScanTimes = agScans.map((scan) => scan.t).sort((a, b) => a - b);
+  const agNextScan = !agScanTimes.length ? 0
+    : agScanTimes.length >= 5
+      ? Math.max(0, agScanTimes[0] + 86400 - agNow)
+      : Math.max(0, agScanTimes[agScanTimes.length - 1] + 86400 / 5 - agNow);
+  const agDevicesAll = Object.entries(agBeyin?.devices || {})
+    .map(([ip, device]) => ({
+      ip,
+      online: !!device.online,
+      seen_count: device.seen_count || 0,
+      last_seen: device.last_seen || null,
+      hints: device.hints || [],
+      hostname: device.hostname || null,
+      classification_note: device.classification_note || "",
+      services: Object.entries(device.services || {}).map(([type, evidence]) => ({
+        type,
+        instance: evidence.instance || "",
+        seen_count: evidence.seen_count || 0,
+        last_seen: evidence.last_seen || null,
+      })),
+      ports: Object.entries(device.ports || {}).map(([port, evidence]) => {
+        const info = agBeyin?.ports?.[port] || {};
+        return {
+          port,
+          name: info.name || "Bilinmeyen",
+          purpose: info.purpose || "Kayitli acik TCP portu",
+          seen_count: evidence.seen_count || 0,
+          last_seen: evidence.last_seen || null,
+        };
+      }).sort((a, b) => a.port.localeCompare(b.port)),
+    }))
+    .sort((a, b) => (b.last_seen || 0) - (a.last_seen || 0));
+  // Web panelde çok uzun listeye neden olmamak için sadece son 20 cihaz gösterilir.
+  const AG_WEB_DEVICE_LIMIT = 20;
+  const agDevices = agDevicesAll.slice(0, AG_WEB_DEVICE_LIMIT);
+  const sistem = {
+    durum: waiting ? "bekleniyor" : (bozuk > 0 || staleSec > 180 || (!D.dogum && !waiting)) ? "degraded" : "güvenilir",
+    integrity: bozuk > 0 ? "uyumsuz" : (staleSec > 180 ? "eski" : "güvenilir"),
+    stale: staleSec > 180,
+    bozuk_satir: bozuk,
+    son_etkinlik_s: sonEtkinlikS,
+    uyari: [...bozukUyari, ...staleUyari, ...dogumUyari],
+  };
+
   return {
-    simdi: Date.now() / 1000,
+    simdi: nowSec,
+    sistem,
     canli: {
       ad: cfg.identity?.name || "core",
-      uyariyor: !kapanis && actT > 0,
-      son_act_s: actT ? Math.round(Date.now() / 1000 - actT) : null,
+      uyariyor: actT > 0 && !kapanis,
+      son_act_s: sonEtkinlikS != null ? Math.round(sonEtkinlikS) : null,
       dogum: D.dogum,
-      uptime_s: D.dogum ? Math.round(Date.now() / 1000 - D.dogum) : null,
+      uptime_s: D.dogum ? Math.round(nowSec - D.dogum) : null,
       act: D.sonAct,
       sikilma: D.sikilma,
       ticks_s: cfg.metabolism?.tick_seconds ?? null,
+      // ---------- Yeni: Bu bilgisayarın bedeni (Aşama 8) ----------
+      beden: D.beden,
+      // ---------- Yeni: Ruh hali / mood vektörü (Aşama 9) ----------
+      mood: D.mood,
+      // ---------- Yeni: USB — kernel seviyesinde (Aşama 10) ----------
+      usb: D.usb,
+      // ---------- Yeni: USB beyni (Aşama USB-Beyn) ----------
+      usb_beyni: usbBeyin ? {
+        toplam_cihaz: usbBeyin.toplam_cihaz || 0,
+        yeni_cihaz_sayisi: usbBeyin.yeni_cihaz_sayisi || 0,
+        son_etkinlik: usbBeyin.son_etkinlik || 0,
+        cihaz_sayisi: Object.keys(usbBeyin.cihazlar || {}).length,
+        cihazlar: Object.entries(usbBeyin.cihazlar || {})
+          .map(([adres, c]) => ({
+            adres,
+            vendor: c.vendor || "?",
+            product: c.product || "?",
+            manufacturer: c.manufacturer || "",
+            product_name: c.product_name || "",
+            gorulenme_sayisi: c.gorulenme_sayisi || 0,
+            durum: c.durum || "bilinik",
+            son_gorunme: c.son_gorunme || null,
+          }))
+          .sort((a, b) => (b.son_gorunme || 0) - (a.son_gorunme || 0))
+          .slice(0, 20),
+      } : null,
+      // ---------- Yeni: Nöral beyinler (kanal bazlı öğrenme) ----------
+      nn_usb: nnUsb ? {
+        ad: nnUsb.ad,
+        katmanlar: nnUsb.katmanlar,
+        lr: nnUsb.lr,
+        son_mse: nnUsb.son_mse || 0,
+        öğrenme_sayısı: nnUsb.öğrenme_sayısı || 0,
+      } : null,
+      nn_ag: nnAg ? {
+        ad: nnAg.ad,
+        katmanlar: nnAg.katmanlar,
+        lr: nnAg.lr,
+        son_mse: nnAg.son_mse || 0,
+        öğrenme_sayısı: nnAg.öğrenme_sayısı || 0,
+      } : null,
+      nn_ana: nnAna ? {
+        ad: nnAna.ad,
+        katmanlar: nnAna.katmanlar,
+        lr: nnAna.lr,
+        son_mse: nnAna.son_mse || 0,
+        öğrenme_sayısı: nnAna.öğrenme_sayısı || 0,
+      } : null,
     },
     kullan: {
       n: D.kullan.n, ok: D.kullan.ok,
@@ -372,17 +583,46 @@ export function durum() {
     uyku: D.uyku.slice(-10).reverse(),
     uyku_durum: uyku.son || {},
     hatalar: D.hatalar,
-    ders_islem: D.dersIslem,
+    ders_islem: D.ders_islem,
     ders: dersSay(),
     beyin: { baglanti: (brain.links || []).length, guclu },
+    komut_help: komutTehlike.help_aciklamalar || {},
+    komut_ciktilari: komutTehlike.komut_ciktilari || {},
     uzuv: {
       model: uzuv ? { siniflar: uzuv.siniflar, ornek: uzuv.ornek,
         toplam: uzuv.toplam } : null,
       durum: durumUzuv,
       son: D.uzuvSon,
     },
-    surec: { ornek: surec.ornek || 0,
-      adet: surec.adet ? Object.keys(surec.adet).length : 0 },
+    evren: D.evren,
+    surec: {
+      ornek: D.surec.ornek || surec.ornek || 0,
+      adet: D.surec.adet
+        || (surec.adet ? Object.keys(surec.adet).length : 0),
+      son: D.surec.son || surec.son_olcum || null,
+      profiller: surec.profiller || {},
+      gecmis: surec.gecmis || [],
+    },
+    ag_beyin: agBeyin ? {
+      schedule: {
+        limit_per_24h: 5,
+        attempts_in_24h: agScanTimes.length,
+        next_in_seconds: agNextScan,
+      },
+      device_count: agDevices.length,
+      online_count: agDevices.filter((device) => device.online).length,
+      devices: agDevices,
+      tools: Object.values(agBeyin.tools || {}),
+      skills: agBeyin.skills || {},
+      probe_learning: agBeyin.probe_learning || {},
+      reference_learning: agBeyin.reference_learning || {},
+      social_learning: agBeyin.social_learning || { enabled: false, peers: [] },
+      consolidation: agBeyin.consolidation || {},
+      port_knowledge: Object.entries(agBeyin.ports || {})
+        .map(([port, info]) => ({ port, ...info }))
+        .sort((a, b) => a.port.localeCompare(b.port)),
+      last_scan: agBeyin.last_scan || null,
+    } : null,
     damak: { samples: damak.samples || 0 },
     // Atölye (Sahne 0-2): canlı dünya durumu (kalıcı .durum.json'dan anlık
     // okuma — jurnal değil, dosyanın kendisi) + merak ekonomisi
@@ -433,6 +673,11 @@ export function durum() {
         toplam: { n, ok, oran: n ? ok / n : 0 },
         hedef: Object.entries(a.hedef)
           .map(([tip, v]) => ({ tip, ...v, oran: v.n ? v.ok / v.n : 0 })),
+        diger: Object.entries(a.diger)
+          .map(([komut, v]) => ({ komut, ...v,
+            oran: v.n ? v.ok / v.n : 0 }))
+          .sort((x, y) => y.n - x.n),
+        sonDiger: a.sonDiger,
         duraklama: Object.values(a.duraklama).reduce((s, x) => s + x, 0),
         son: a.son,
       };
@@ -492,10 +737,12 @@ export function durum() {
     seriler: D.seriler,
     toplam_satir: D.toplam,
     bozuk,
+    neden: D.neden,
+    disSal: D.disSal,
+    konsolidasyon: D.konsolidasyon,
   };
 }
 
 export function halkaSon(n = 150) {
   return D.ring.slice(-n).reverse();
 }
-

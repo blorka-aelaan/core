@@ -13,6 +13,12 @@ MLP (nöron/ağırlık işlemleri): NumPy.
   3: kapat_ag
   4: kisitla_dosya
   5: guvenli_mod
+  6: sifirla
+  7: asm_ogren
+  8: kod_duzenle
+  9: gossip
+  10: cocuk_olustur
+  11: ag_tara
 
 Öğrenme: çevrimiçi (online). Her tikte bir karar alınır, ardından
 gerçek sonuç (ödül) ogren() ile beyine geri verilir ve ağırlıklar
@@ -38,9 +44,14 @@ Kayıt: zeka/ust_beyn.json
 import json
 import os
 import random
+from collections import deque
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Dict, Optional, List
 
 import numpy as np
+
+from uzuv import asm_ogren
 
 ROOT = Path(__file__).resolve().parent
 
@@ -52,6 +63,12 @@ KOMUT_KAPAT_AG = "kapat_ag"
 KOMUT_KISITLA_DOSYA = "kisitla_dosya"
 KOMUT_GUVENLI_MOD = "guvenli_mod"
 KOMUT_SIFIRLA = "sifirla"  # Feature #2: World Model + reset komutu
+KOMUT_ASM_OGREN = "asm_ogren"  # Yeni: ASM (x86-64) program öğrenme eylemi
+# Yeni: Yapısal evrim (Aşama 7)
+KOMUT_KOD_DUZENLE = "kod_duzenle"  # Kendi kodunu düzenle
+KOMUT_GOSSIP = "gossip"             # P2P durum paylaşımı
+KOMUT_COCUK_OLUSTUR = "cocuk_olustur"  # Çoğaltma / çocuk yarat
+KOMUT_AG_TARA = "ag_tara"           # Yeni: Ağ keşif tarama (ag_beyin entegrasyonu)
 
 KOMUTLAR = [
     KOMUT_YOK,
@@ -61,13 +78,20 @@ KOMUTLAR = [
     KOMUT_KISITLA_DOSYA,
     KOMUT_GUVENLI_MOD,
     KOMUT_SIFIRLA,
+    KOMUT_ASM_OGREN,
+    KOMUT_KOD_DUZENLE,
+    KOMUT_GOSSIP,
+    KOMUT_COCUK_OLUSTUR,
+    KOMUT_AG_TARA,
 ]
 
 KOMUT_INDEKSI = {k: i for i, k in enumerate(KOMUTLAR)}
 
-SINYAL_BOYUT = 36
+SINYAL_BOYUT = 48
 GIZLI_BOYUT = 16
-CIKIS_BOYUT = len(KOMUTLAR)  # 7
+CIKIS_BOYUT = len(KOMUTLAR)  # 13
+SINYAL_SURUMU = 3
+UST_MODEL_SURUMU = 4
 
 # Sinyal vektörü indeks sabitleri (topla_sinyalleri ile aynı sırada)
 # 0 enerji, 1 açlık, 2 acı, 3 sıkılma, 4 tehlike, 5 canlı,
@@ -94,6 +118,22 @@ IDX_DUNYA_BOZUK = 24
 IDX_SURPRIZ = 25
 IDX_GOREV = 26
 IDX_BAGLAM = 27
+# ---------- Yeni: Beden duyuları (Aşama 1) ----------
+IDX_MOOD_MUTLULUK = 33
+IDX_MOOD_KORKU = 34
+IDX_MOOD_MERAK = 35
+IDX_CPU_YUK = 36
+IDX_PROSES_NORM = 37
+IDX_DISK_YUZDE = 38
+IDX_BELLEK_YUZDE = 39
+IDX_USB_CIHAZ = 40
+IDX_USB_KEŞIF = 41
+IDX_AG_BAGLANTI = 42
+IDX_INSAN_VAR = 43
+IDX_SISTEM_SAATI = 44
+IDX_DISK_BASKI = 45
+IDX_BELLEK_BASKI = 46
+IDX_BEDEN_BASKI = 47
 
 
 # --------------------------------------------------------------- NumPy MLP
@@ -103,6 +143,9 @@ class TinyMLP:
     def __init__(self, n_in, n_hidden, n_out, seed=None):
         # Yerel RNG: global np.random.seed() diğer modülleri bozuyordu
         self.rng = np.random.default_rng(seed)
+        self.n_in = n_in
+        self.n_hidden = n_hidden
+        self.n_out = n_out
         self.W1 = self.rng.standard_normal((n_hidden, n_in)) * 0.4
         self.b1 = np.zeros(n_hidden)
         self.W2 = self.rng.standard_normal((n_out, n_hidden)) * 0.4
@@ -112,6 +155,24 @@ class TinyMLP:
         self.Vb1 = np.zeros(n_hidden)
         self.VW2 = np.zeros((n_out, n_hidden))
         self.Vb2 = np.zeros(n_out)
+
+    def genislet(self, yeni_n_out):
+        """Çıkış katmanını genişletir (yeni nöronlar için rastgele ağırlık)."""
+        if yeni_n_out <= self.n_out:
+            return
+        delta = yeni_n_out - self.n_out
+        # Yeni W2 satırları: (delta, n_hidden)
+        yeni_W2 = self.rng.standard_normal((delta, self.n_hidden)) * 0.4
+        self.W2 = np.vstack([self.W2, yeni_W2])
+        # Yeni b2: (delta,)
+        yeni_b2 = np.zeros(delta)
+        self.b2 = np.concatenate([self.b2, yeni_b2])
+        # Momentum matrisleri genişlet
+        yeni_VW2 = np.zeros((delta, self.n_hidden))
+        self.VW2 = np.vstack([self.VW2, yeni_VW2])
+        yeni_Vb2 = np.zeros(delta)
+        self.Vb2 = np.concatenate([self.Vb2, yeni_Vb2])
+        self.n_out = yeni_n_out
 
     def forward(self, x):
         """x: (n_in,) → (logits, a1, z1)"""
@@ -170,13 +231,29 @@ class UstBeyn:
     bir 'kapat_ag'/'acil_yem' canlı sistemi bozamaz.
     """
 
-    def __init__(self, cfg, root=None, seed=7):
+    eylem_katalogu = {
+        "bilgi_topla": {"risk": 0.15, "cost": 0.20, "gain": 0.75, "requires_verification": False},
+        "dosya_tara": {"risk": 0.25, "cost": 0.30, "gain": 0.85, "requires_verification": False},
+        "network_tara": {"risk": 0.45, "cost": 0.50, "gain": 0.90, "requires_verification": True},
+        "asm_ogren": {"risk": 0.55, "cost": 0.65, "gain": 0.95, "requires_verification": True},
+        "komut_ver": {"risk": 0.70, "cost": 0.55, "gain": 0.80, "requires_verification": True},
+        "dogrula": {"risk": 0.10, "cost": 0.30, "gain": 0.85, "requires_verification": False},
+    }
+    eylem_bilgi = {}
+
+    def __init__(self, cfg, root=None, seed=7, ag_beyin=None):
         self.cfg = cfg or {}
         self.root = Path(root or ROOT)
-        self.seed = seed
-        self.rng = random.Random(seed)
+        self.seed = 7 if seed is None else seed
+        self.rng = random.Random(self.seed)
+        # --- ag_beyin entegrasyonu ---
+        self.ag_beyin = ag_beyin  # AgBeyin örneği (ağ keşif orkestrasyonu)
+        self._son_scan_odulu = 0.0  # Son tarama ödülü (ust.ogren ile beslenir)
+        self._son_scan_tik = 0  # Son tarama tik'i
 
-        self.mlp = TinyMLP(SINYAL_BOYUT, GIZLI_BOYUT, CIKIS_BOYUT, seed=seed)
+        self.mlp = TinyMLP(
+            SINYAL_BOYUT, GIZLI_BOYUT, CIKIS_BOYUT, seed=self.seed
+        )
 
         self.epsilon = 0.15
         self.epsilon_min = 0.05
@@ -251,11 +328,186 @@ class UstBeyn:
         self.reddedilen_sayilari = [0] * CIKIS_BOYUT
         # Son kalite ölçümü: ödül geçmişi (replay için)
         self.odul_gecmisi = []
+        # Kısa hafıza: son kararlar ve güven skorları; bu, doğru seçimleri
+        # daha iyi değerlendirmek için kararların bağlamını tutar.
+        self.kisa_hafiza = deque(maxlen=64)
+        # Hata kategorisi: reddedilme/negatif ödül gibi olayların bağlam
+        # içindeki dağılımını kaydeder; sistem kendi neyi yanlış yaptığını
+        # öğrenebilir.
+        self.hata_kategorisi = {}
+        self.journal = SimpleNamespace(log=lambda *args, **kwargs: None)
+        self.last_confidence = 0.0
+        self.last_komut_idx = KOMUT_INDEKSI[KOMUT_YOK]
+        # Dünya modeli: bağlam bazlı geçmiş ödül örüntülerini hatırlar.
+        # Bu, bir komutun sadece "güvenli" değil, "bu bağlamda faydalı"
+        # olduğunu da değerlendirmesini sağlar.
+        self.dunya_modeli = {}
+        # Özbenlik modeli: sistemin kendi istikrarını, kırılganlığını ve
+        # karar güveni için gereken yeniden ayarlamayı anlaması.
+        self.kimlik = {
+            "ad": "Aelaan",
+            "ilkeler": ["kanita_bagli_ogrenme", "once_hayatta_kalma", "guvenlik_sinirlari"],
+        }
+        self.deger_profili = {
+            "hayatta_kalma": 1.0,
+            "kanit": 0.9,
+            "kesif": 0.35,
+            "otonomi": 0.6,
+        }
+        self.mizac = {"temkin": 0.35, "merak": 0.35, "sebat": 0.5}
+        self.uzun_hafiza = {
+            "toplam_sonuc": 0,
+            "olumlu_sonuc": 0,
+            "olumsuz_sonuc": 0,
+            "odul_toplami": 0.0,
+            "komutlar": {},
+        }
+        # Özbenlik modeli: sistemin kendi istikrarını, kırılganlığını ve
+        # karar güveni için gereken yeniden ayarlamayı anlaması.
+        self.ozben_modeli = {
+            "durum": "hazir",
+            "istikrar": 0.0,
+            "hata_orani": 0.0,
+            "ortalama_odul": 0.0,
+            "guven_duyarliligi": 0.0,
+        }
+
+        # ------------------------------------------------- ASM öğrenme alt sistemi
+        # Lazy başlatılır (ilk asm_* çağrısında), normal işletmede ağır olmaz.
+        self._asm_öğrenici = None
+
+        # Üst beyin, sadece asm_ogren değil, tüm eylem türlerini bilir:
+        # bilgi toplama, dosya/ağ tarama, çözüm üretme ve doğrulama.
+        self.eylem_katalogu = {
+            "bilgi_topla": {
+                "risk": 0.15, "cost": 0.20, "gain": 0.75,
+                "requires_verification": False,
+            },
+            "dosya_tara": {
+                "risk": 0.25, "cost": 0.30, "gain": 0.85,
+                "requires_verification": False,
+            },
+            "network_tara": {
+                "risk": 0.45, "cost": 0.50, "gain": 0.90,
+                "requires_verification": True,
+            },
+            "asm_ogren": {
+                "risk": 0.55, "cost": 0.65, "gain": 0.95,
+                "requires_verification": True,
+            },
+            "komut_ver": {
+                "risk": 0.70, "cost": 0.55, "gain": 0.80,
+                "requires_verification": True,
+            },
+            "dogrula": {
+                "risk": 0.10, "cost": 0.30, "gain": 0.85,
+                "requires_verification": False,
+            },
+        }
+        self.eylem_bilgi = {}
 
         self._load()
 
     # ------------------------------------------------- Yeni: Dinamik epsilon
     def update_dynamic_params(self, drives):
+        """Enerji, acı ve sıkılmaya göre epsilon'ı dinamik ayarla.
+
+        - Düşük enerji / acı (yaşama tehlikesi): epsilon düşer (daha az keşif,
+          daha çok riflenen eylem).
+        - Yüksek sıkılma: epsilon rises (rutin kırılmalı).
+        - Homeostaz düşükse: epsilon sınırlıdır (survival first).
+        """
+        e_cap = max(1.0, float(getattr(drives, "energy_cap", 150)))
+        e_ratio = max(0.0, min(1.0, float(getattr(drives, "energy", 50)) / e_cap))
+        _pain = getattr(drives, "pain", 0.0)
+        pain_raw = _pain() if callable(_pain) else _pain
+        pain = float(pain_raw) if isinstance(pain_raw, (int, float)) else 0.0
+        pain = max(0.0, min(1.0, pain))
+        sik = max(0.0, min(1.0, float(getattr(drives, "sikilma", 0.0))))
+
+        # epsilon: acıda çok düşük (hayatta kalma > keşif), sıkıldığında yüksel
+        eps_target = self.eps_base * (1.0 + self.eps_sikilma_karani * sik) * (
+            1.0 - self.eps_agri_karani * pain
+        )
+        # Homeostaz düşükse epsilon'ı daha da kısıtla (survival first)
+        eps_target *= 0.85 + 0.3 * self.mizac["merak"]
+        h = getattr(drives, "homeostaz_puani", lambda: 0.5)
+        if callable(h):
+            h = h()
+        h_value = float(h) if isinstance(h, (int, float)) else 0.5
+        if h_value < 0.45:
+            eps_target *= 0.5  # uyarı modunda keşif yarım
+
+        self.epsilon = max(self.epsilon_min, min(self.epsilon_max, eps_target))
+
+    # ------------------------------------------------- Yeni: Yapısal evrim (Aşama 7)
+    def genislet(self, yeni_komutlar):
+        """MLP çıkış katmanını dinamik olarak genişletir.
+
+        Yeni komutlar eklendiğinde çıkış nöron sayısı artar: W2, b2 ve
+        ilgili takip dizileri genişletilir. Yeni ağırlıklar küçük
+        rastgele değerle başlatılır (sıfırdan başlayan yeni eylem,
+        eski bilgiyi bozmaz).
+
+        Parametreler
+        ----------
+        yeni_komutlar : list[str]
+            Eklenecek komut adları (zaten varsa atlanır).
+
+        Döner
+        -----
+        eklenen : list[str]
+            Gerçekten eklenen komut adları.
+        """
+        eklenen = []
+        for ad in yeni_komutlar:
+            if ad in KOMUT_INDEKSI:
+                continue
+            # Yeni komutu kaydet
+            yeni_idx = len(KOMUTLAR)
+            KOMUTLAR.append(ad)
+            KOMUT_INDEKSI[ad] = yeni_idx
+            eklenen.append(ad)
+
+        if not eklenen:
+            return eklenen
+
+        n_eski = self.mlp.n_out if hasattr(self.mlp, "n_out") else CIKIS_BOYUT
+        n_yeni = len(KOMUTLAR)
+        delta = n_yeni - n_eski
+
+        # MLP'i genişlet
+        self.mlp.genislet(n_yeni)
+
+        # CIKIS_BOYUT'u güncelle (modül sabiti)
+        globals()["CIKIS_BOYUT"] = n_yeni
+
+        # Takip dizilerini genişlet
+        eski_dogrulama = self.dogrulama
+        self.dogrulama = [0.0] * n_yeni
+        self.dogrulama[:n_eski] = eski_dogrulama
+
+        eski_redd_serisi = self.redd_serisi
+        self.redd_serisi = [0] * n_yeni
+        self.redd_serisi[:n_eski] = eski_redd_serisi
+
+        eski_redd_cooldown = self.redd_cooldown
+        self.redd_cooldown = [0] * n_yeni
+        self.redd_cooldown[:n_eski] = eski_redd_cooldown
+
+        eski_secim = self.secim_sayilari
+        self.secim_sayilari = [0] * n_yeni
+        self.secim_sayilari[:n_eski] = eski_secim
+
+        eski_reddedilen = self.reddedilen_sayilari
+        self.reddedilen_sayilari = [0] * n_yeni
+        self.reddedilen_sayilari[:n_eski] = eski_reddedilen
+
+        self.journal.log("beyin_genislet", eklenen=eklenen,
+                         onceki_n_out=n_eski, yeni_n_out=n_yeni)
+        return eklenen
+
+
         """Enerji, acı ve sıkılmaya göre epsilon'ı dinamik ayarla.
 
         - Düşük enerji / acı (yaşama tehlikesi): epsilon düşer (daha az keşif,
@@ -352,8 +604,120 @@ class UstBeyn:
             return "tehlike" if (tehlike or sok) else "sakin"
         if komut_idx == KOMUT_INDEKSI[KOMUT_KISITLA_DOSYA]:
             return "tehlike" if (mesaj or tehlike) else "sakin"
+        if komut_idx == KOMUT_INDEKSI[KOMUT_AG_TARA]:
+            return "genel"  # Ağ tarama her zaman anlamlı (kapsam kilidi ag_beyin'de)
         # Bağlamdan bağımsız komutlar.
         return "genel"
+
+    def _dunya_model_tahmini(self, sinyal_vektor, komut_idx):
+        """Geçmiş bağlamlarda aynı komutun ortalama ödülünü döndürür."""
+        x = np.asarray(sinyal_vektor, dtype=float)
+        bag = self.baglam_anahtari(x)
+        entry = self.dunya_modeli.get(bag, {})
+        history = entry.get(int(komut_idx), [])
+        if not history:
+            return 0.0
+        return float(sum(history) / max(1, len(history)))
+
+    def _dunya_model_guncelle(self, sinyal_vektor, komut_idx, odul):
+        """Dünya modelini, gerçek sonuçla birlikte günceller."""
+        x = np.asarray(sinyal_vektor, dtype=float)
+        bag = self.baglam_anahtari(x)
+        entry = self.dunya_modeli.setdefault(bag, {})
+        history = entry.setdefault(int(komut_idx), [])
+        history.append(float(odul))
+        if len(history) > 16:
+            history.pop(0)
+
+    def _uzun_hafizayi_guncelle(self, komut_idx, odul):
+        """Gerçek sonuçları sınırlı boyutlu, ömür boyu özetler."""
+        memory = self.uzun_hafiza
+        memory["toplam_sonuc"] += 1
+        memory["odul_toplami"] += float(odul)
+        if odul > 0.0:
+            memory["olumlu_sonuc"] += 1
+        elif odul < 0.0:
+            memory["olumsuz_sonuc"] += 1
+        name = self.komut_adi(komut_idx) or "yok"
+        if name not in memory["komutlar"] and len(memory["komutlar"]) >= 128:
+            memory["komutlar"].pop(next(iter(memory["komutlar"])))
+        result = memory["komutlar"].setdefault(name, {"sayi": 0, "odul_toplami": 0.0})
+        result["sayi"] += 1
+        result["odul_toplami"] += float(odul)
+
+    def kendini_tanimla(self):
+        """Aelaan'ın kimliğini ve iç değerlendirmesini döndürür."""
+        return {
+            "kimlik": dict(self.kimlik),
+            "deger_profili": dict(self.deger_profili),
+            "mizac": dict(self.mizac),
+            "ozben_modeli": dict(self.ozben_modeli),
+            "uzun_hafiza": {
+                **self.uzun_hafiza,
+                "komutlar": {ad: dict(veri) for ad, veri in self.uzun_hafiza["komutlar"].items()},
+            },
+        }
+
+    def _hedef_oncelik_puani(self, sinyal_vektor, komut_idx):
+        """İçsel hedef hiyerarşisi: hayatta kalma > enerji > keşif."""
+        x = np.asarray(sinyal_vektor, dtype=float)
+        if x.size <= IDX_ACLIK:
+            return 0.0
+        acik = float(x[IDX_ACLIK]) > 0.5
+        tehlike = (float(x[IDX_TEHLIKE]) > 0.0 or
+                   (x.size > IDX_OLUM_RISK and float(x[IDX_OLUM_RISK]) > 0.0))
+        enerji = float(x[IDX_ENERJI]) if x.size > IDX_ENERJI else 0.5
+
+        if komut_idx == KOMUT_INDEKSI[KOMUT_ACIL_YEM] and acik:
+            return 1.0
+        if komut_idx in (KOMUT_INDEKSI[KOMUT_ACIL_DINLEN],
+                         KOMUT_INDEKSI[KOMUT_GUVENLI_MOD]) and tehlike:
+            return 1.0
+        if komut_idx == KOMUT_INDEKSI[KOMUT_KAPAT_AG] and tehlike:
+            return 0.8
+        if komut_idx == KOMUT_INDEKSI[KOMUT_KISITLA_DOSYA] and (tehlike or enerji < 0.35):
+            return 0.7
+        if komut_idx == KOMUT_INDEKSI[KOMUT_YOK] and not acik and not tehlike:
+            return 0.2
+        return 0.0
+
+    def _ozben_durumu(self, sinyal_vektor=None):
+        """Kendi istikrarını, hata oranını ve güven duyarlılığını çıkarır."""
+        x = np.asarray(sinyal_vektor, dtype=float) if sinyal_vektor is not None else None
+        recent = self.odul_gecmisi[-24:] if self.odul_gecmisi else []
+        avg_reward = float(sum(recent) / max(1, len(recent))) if recent else 0.0
+        fail_rate = float(sum(1 for r in recent if r < 0.0) / max(1, len(recent))) if recent else 0.0
+        rejection_count = sum(self.reddedilen_sayilari)
+        rejection_rate = float(rejection_count / max(1, self.tik))
+        danger = 0.0
+        if x is not None and x.size > IDX_TEHLIKE:
+            danger = float(max(x[IDX_TEHLIKE], x[IDX_OLUM_RISK] if x.size > IDX_OLUM_RISK else 0.0))
+        lifetime = self.uzun_hafiza["toplam_sonuc"]
+        lifetime_failure = self.uzun_hafiza["olumsuz_sonuc"] / max(1, lifetime)
+        fail_rate = max(fail_rate, 0.5 * lifetime_failure)
+        boredom = float(x[IDX_SIKILMA]) if x is not None and x.size > IDX_SIKILMA else 0.0
+        self.mizac = {
+            "temkin": float(max(0.0, min(1.0, 0.25 + 0.45 * fail_rate + 0.3 * rejection_rate))),
+            "merak": float(max(0.0, min(1.0, 0.2 + 0.55 * boredom + 0.25 * (1.0 - lifetime_failure) - 0.3 * danger))),
+            "sebat": float(max(0.0, min(1.0, 0.4 + 0.4 * (1.0 - fail_rate) + 0.2 * max(0.0, avg_reward)))),
+        }
+        if avg_reward > 0.25 and fail_rate < 0.2 and rejection_rate < 0.25 and danger < 0.5:
+            durum = "stabil"
+            istikrar = 0.8 + min(0.2, avg_reward)
+        elif avg_reward < -0.05 or fail_rate > 0.4 or rejection_rate > 0.45 or danger > 0.75:
+            durum = "kritik"
+            istikrar = 0.2 + max(-0.2, avg_reward)
+        else:
+            durum = "kararsiz"
+            istikrar = 0.5 + avg_reward * 0.25
+        self.ozben_modeli = {
+            "durum": durum,
+            "istikrar": float(max(0.0, min(1.0, istikrar))),
+            "hata_orani": float(max(0.0, min(1.0, fail_rate + rejection_rate * 0.4))),
+            "ortalama_odul": float(avg_reward),
+            "guven_duyarliligi": float(max(0.0, min(1.0, 1.0 - istikrar))),
+        }
+        return self.ozben_modeli
 
     def komut_kanit_puani(self, komut_idx, sinyal_vektor):
         """Komutun BU bağlamdaki kanıt puanı (tek kaynak).
@@ -406,7 +770,210 @@ class UstBeyn:
             return tehlike or sok
         if komut_idx == KOMUT_INDEKSI[KOMUT_KISITLA_DOSYA]:
             return mesaj or tehlike
+        if komut_idx == KOMUT_INDEKSI[KOMUT_AG_TARA]:
+            # Ağ taraması her zaman kullanılabilir; ag_beyin kapsam kilidi
+            # ve oran sınırlamasını kendi içerisinde yönetir.
+            return True
         return True
+
+    def _eylem_komut_hint(self, sinyal_vektor):
+        """En iyi araç eylemini, canlı sistemde kullanabileceği komuta çevirir.
+
+        Bu dönüşüm, katalogun sadece "meta" olarak kalmasını önler. Eylem
+        seçimleri gerçek karar sürecine küçük ama faydalı bir önyargı olarak
+        eklenir: örneğin asm öğrenim önerisi, asm_ogren komutunu işaretler.
+        """
+        eylem_adi, puan, uygun = self.en_iyi_eylem_sec(sinyal_vektor)
+        if not uygun:
+            return KOMUT_INDEKSI[KOMUT_YOK]
+        x = np.asarray(sinyal_vektor, dtype=float)
+        tehlike = (x.size > IDX_TEHLIKE and float(x[IDX_TEHLIKE]) > 0.0)
+        mesaj = (x.size > IDX_MESAJ_VAR and float(x[IDX_MESAJ_VAR]) > 0.0)
+        acik = (x.size > IDX_ACLIK and float(x[IDX_ACLIK]) > 0.5)
+        if eylem_adi == "asm_ogren":
+            return KOMUT_INDEKSI[KOMUT_ASM_OGREN]
+        if eylem_adi == "network_tara":
+            # ag_beyin entegrasyonu: network_tara → KOMUT_AG_TARA
+            # Gerçek tarama işlemi ag_beyin.scan_next_step() ile yürütülür.
+            return KOMUT_INDEKSI[KOMUT_AG_TARA]
+        if eylem_adi == "komut_ver":
+            return KOMUT_INDEKSI[KOMUT_GUVENLI_MOD] if tehlike or mesaj else KOMUT_INDEKSI[KOMUT_ACIL_DINLEN]
+        if eylem_adi == "dosya_tara":
+            return KOMUT_INDEKSI[KOMUT_KISITLA_DOSYA]
+        if eylem_adi == "dogrula":
+            return KOMUT_INDEKSI[KOMUT_YOK]
+        if eylem_adi == "bilgi_topla":
+            return KOMUT_INDEKSI[KOMUT_YOK]
+        return KOMUT_INDEKSI[KOMUT_YOK]
+
+    def eylem_katalogunu_yukle(self):
+        """Üst beynin araç katalogunu döndürür."""
+        return {k: dict(v) for k, v in self.eylem_katalogu.items()}
+
+    def eylem_uygulanabilir_mi(self, eylem_adi, sinyal_vektor):
+        """Bir eylemin bu bağlamda uygun olup olmadığını değerlendirir."""
+        if eylem_adi not in self.eylem_katalogu:
+            return False
+        x = np.asarray(sinyal_vektor, dtype=float)
+        if eylem_adi == "bilgi_topla":
+            return True
+        if eylem_adi == "dosya_tara":
+            return x.size > 0 and (x.size <= IDX_GOREV or float(x[IDX_GOREV]) > 0.1)
+        if eylem_adi == "network_tara":
+            tehlike = (x.size > IDX_TEHLIKE and float(x[IDX_TEHLIKE]) > 0.0)
+            mesaj = (x.size > IDX_MESAJ_VAR and float(x[IDX_MESAJ_VAR]) > 0.0)
+            return (not tehlike) or mesaj
+        if eylem_adi == "asm_ogren":
+            sik = float(x[IDX_SIKILMA]) if x.size > IDX_SIKILMA else 0.0
+            gorev = float(x[IDX_GOREV]) if x.size > IDX_GOREV else 0.0
+            return sik > 0.25 or gorev > 0.25
+        if eylem_adi == "komut_ver":
+            tehlike = (x.size > IDX_TEHLIKE and float(x[IDX_TEHLIKE]) > 0.0)
+            mesaj = (x.size > IDX_MESAJ_VAR and float(x[IDX_MESAJ_VAR]) > 0.0)
+            return tehlike or mesaj
+        if eylem_adi == "dogrula":
+            return x.size > 0
+        return True
+
+    def eylem_degeri(self, eylem_adi, sinyal_vektor):
+        """Eylemin bağlamdaki değerini hesaplar: bilgi kazancı - risk - maliyet."""
+        meta = self.eylem_katalogu.get(eylem_adi)
+        if meta is None:
+            return 0.0
+        x = np.asarray(sinyal_vektor, dtype=float)
+        risk = float(meta.get("risk", 0.0))
+        cost = float(meta.get("cost", 0.0))
+        gain = float(meta.get("gain", 0.0))
+        if eylem_adi == "asm_ogren":
+            sik = float(x[IDX_SIKILMA]) if x.size > IDX_SIKILMA else 0.0
+            gorev = float(x[IDX_GOREV]) if x.size > IDX_GOREV else 0.0
+            # ASM öğrenimi, sıkılma/görev baskısı yüksekken gerçek değer
+            # taşır; aksi halde genel "doğrula" eylemi çok önde çıkabilir.
+            gain += 0.50 * sik + 0.50 * gorev
+            # Dinamik risk azaltma: sıkıldıkça (sik>0) riski düşür; boşta
+            # daha da riski azalt, ancak minimum %40 oranında.
+            if sik > 0.0:
+                risk *= max(0.60, 1.0 - 0.35 * min(1.0, sik))
+        if eylem_adi == "network_tara":
+            mesaj = float(x[IDX_MESAJ_VAR]) if x.size > IDX_MESAJ_VAR else 0.0
+            gain += 0.10 * mesaj
+            # ag_beyin entegrasyonu: tarama hazırsa gain'i artır,
+            # son scan okuyulu/başarılıysa ek bonus.
+            if self.ag_beyin is not None:
+                try:
+                    if self.ag_beyin.next_due_in() <= 0:
+                        gain += 0.15  # Tarama ventana açık
+                    son_scan = self.ag_beyin.data.get("last_scan", {})
+                    if son_scan.get("ok", False):
+                        gain += 0.10  # Önceki tarama başarılı
+                except Exception:
+                    pass
+        if eylem_adi == "komut_ver":
+            tehlike = float(x[IDX_TEHLIKE]) if x.size > IDX_TEHLIKE else 0.0
+            gain += 0.12 * tehlike
+        deger = gain - risk - (cost * 0.5)
+        return float(max(0.0, min(1.0, deger)))
+
+    def en_iyi_eylem_sec(self, sinyal_vektor):
+        """Bu bağlam için en uygun ve en değerli eylemi döndürür."""
+        adaylar = []
+        for eylem_adi in self.eylem_katalogu:
+            if self.eylem_uygulanabilir_mi(eylem_adi, sinyal_vektor):
+                adaylar.append((eylem_adi, self.eylem_degeri(eylem_adi, sinyal_vektor)))
+        if not adaylar:
+            return ("bilgi_topla", 0.0, False)
+        eylem_adi, puan = max(adaylar, key=lambda item: item[1])
+        return (eylem_adi, float(puan), True)
+
+    def eylem_ogren(self, eylem_adi, odul, sinyal_vektor=None, maliyet=0.0):
+        """Eylem başarısını hafızada kaydeder; üst beyin bu bilgiyi sonraki kararında kullanır."""
+        if eylem_adi not in self.eylem_katalogu:
+            return 0.0
+        odul = max(-1.0, min(1.0, float(odul)))
+        mevcut = self.eylem_bilgi.get(eylem_adi, {"puan": 0.0, "deneme": 0, "basarili": 0})
+        mevcut["deneme"] = int(mevcut.get("deneme", 0)) + 1
+        mevcut["puan"] = float(max(0.0, min(1.0, mevcut.get("puan", 0.0) + odul * 0.20)))
+        if odul > 0:
+            mevcut["basarili"] = int(mevcut.get("basarili", 0)) + 1
+        self.eylem_bilgi[eylem_adi] = mevcut
+        return float(mevcut["puan"])
+
+    # --------------------------------------------------------------- ag_beyin entegrasyonu
+
+    def scan_hazir_mi(self, now: Optional[float] = None) -> bool:
+        """ag_beyin scansı şu anda yapılabilir mi? (oran sınırı + kapsam kilidi)"""
+        if self.ag_beyin is None:
+            return False
+        try:
+            return self.ag_beyin.next_due_in(now) <= 0.0
+        except Exception:
+            return False
+
+    def scan_calistir(self, now: float) -> Optional[Dict[str, Any]]:
+        """ag_beyin üzerinden bir tarama adımı çalıştırır ve sonucu döndürür.
+
+        Returns scan sonucu dict'i veya None (scan zaten devam ediyorsa / hazır değilse).
+        """
+        if self.ag_beyin is None:
+            return None
+        if not self.scan_hazir_mi(now):
+            return None
+        try:
+            sonuc = self.ag_beyin.scan_next_step(now)
+            if sonuc and sonuc.get("ok"):
+                self._son_scan_odulu = float(sonuc.get("probe_reward", 0.0))
+                self._son_scan_tik = int(self.tik)
+                self.journal.log(
+                    "ag_tara_adim",
+                    step=sonuc.get("step"),
+                    probe=sonuc.get("probe"),
+                    hosts=sonuc.get("hosts"),
+                    ports=sonuc.get("ports"),
+                    reward=self._son_scan_odulu,
+                )
+            return sonuc
+        except Exception as e:
+            self.journal.log("ag_tara_hata", hata=str(e)[:200])
+            return None
+
+    def scan_odulu_besle(self, odul: float, tik: int) -> None:
+        """Tarama sonucundan elde edilen ödülü ust_beyn öğrenme sistemine besler.
+
+        Bu sayede MLP, 'network_tara' eylemini gerçek sonuçlara göre
+        değerlendirir ve daha sonraki kararlarında uygun zaman seçer.
+        """
+        if odul is None:
+            odul = 0.0
+        odul = max(-1.0, min(1.0, float(odul)))
+        # eylem_bilgi üzerinden 'network_tara' için kanıt biriktir
+        self.eylem_ogren("network_tara", odul)
+        # MLP üzerinden doğrudan öğren: ağ tarama sonucu için
+        # nötr (sıfır) sinyal vektörü kullanılır — gerçek karar bağlamı
+        # yok, yalnızca eylem-ödül ilişkisi öğretilir.
+        komut_idx = KOMUT_INDEKSI[KOMUT_AG_TARA]
+        self.ogren(np.zeros(SINYAL_BOYUT, dtype=float), komut_idx, odul)
+        self._son_scan_odulu = odul
+        self._son_scan_tik = int(tik)
+
+    def scan_ozeti(self) -> Dict[str, Any]:
+        """ag_beyin scan durumu özeti (raporlama / web paneli için)."""
+        if self.ag_beyin is None:
+            return {"ag_beyin_yok": True}
+        ss = self.ag_beyin.data.get("scan_state", {})
+        last = self.ag_beyin.data.get("last_scan", {})
+        return {
+            "step": int(ss.get("step", 1)),
+            "live_hosts": len(ss.get("live_hosts", [])),
+            "last_networks": ss.get("last_networks", []),
+            "scan_hazir": self.scan_hazir_mi(),
+            "son_scan_ok": bool(last.get("ok", False)),
+            "son_scan_probe": last.get("probe"),
+            "son_scan_hosts": last.get("hosts", 0),
+            "son_scan_ports": last.get("ports", 0),
+            "son_scan_odul": float(last.get("probe_reward", 0.0)),
+            "ust_son_odul": self._son_scan_odulu,
+            "ust_son_tik": self._son_scan_tik,
+        }
 
     def _dogrulama_puani(self, komut_idx, sinyal_vektor=None):
         """Komutun mevcut bağlamdaki doğrulama puanı.
@@ -422,6 +989,8 @@ class UstBeyn:
         demektir. Global puana düşmek, tam olarak bu hatayı
         (yanlış bağlamda onay) üretirdi.
 
+        if komut_idx == KOMUT_INDEKSI[KOMUT_ASM_OGREN]:
+            return float(x[IDX_ENERJI]) > 0.2 and not tehlike
         Bu yüzden kural şudur:
           * Bağlam için KAYIT varsa  → bağlamsal puan (güçlü kanıt)
           * Aksi → 0 (kanıt yok, onaylanmaz)
@@ -521,6 +1090,22 @@ class UstBeyn:
         # MARJ_OLCEK: marj 0.15 → "belirgin tercih" (normalize 1.0)
         return float(min(1.0, marj / self.marj_olcek))
 
+    def _kaydet_hata(self, kategori, komut_indeksi, sinyal_vektor):
+        """Bağlam bazlı hata kategorisini kaydeder."""
+        x = np.asarray(sinyal_vektor, dtype=float) if sinyal_vektor is not None else None
+        if x is None or x.size <= IDX_ACLIK:
+            baglam = "genel"
+        else:
+            acik = float(x[IDX_ACLIK]) > 0.5
+            tehlike = (float(x[IDX_TEHLIKE]) > 0.0 or
+                       (x.size > IDX_OLUM_RISK and float(x[IDX_OLUM_RISK]) > 0.0))
+            baglam = "acik" if acik else ("tehlike" if tehlike else "sakin")
+        key = f"{kategori}:{baglam}:{self.komut_adi(komut_indeksi)}"
+        self.hata_kategorisi[key] = self.hata_kategorisi.get(key, 0) + 1
+        if len(self.hata_kategorisi) > 32:
+            for _ in range(len(self.hata_kategorisi) - 32):
+                self.hata_kategorisi.pop(next(iter(self.hata_kategorisi)))
+
     def sec(self, sinyal_vektor, epsilon=None):
         """Sinyal vektörüne göre komut seçer.
 
@@ -570,6 +1155,15 @@ class UstBeyn:
             # rastgele tercih kanıt sayılmaz.
             gv = float(min(1.0, probs[idx] * 0.5))
             gv = min(gv, max(0.0, self.dogrulama_esigi * 0.9))
+            self.last_confidence = float(gv)
+            self.last_komut_idx = idx
+            self.kisa_hafiza.append({
+                "komut": KOMUTLAR[idx],
+                "idx": int(idx),
+                "confidence": float(gv),
+                "baglam": self.baglam_anahtari(np.asarray(sinyal_vektor, dtype=float)),
+                "source": "kesif",
+            })
             return KOMUTLAR[idx], idx, gv, "kesif"
 
         # MODEL KARARI — ACTION MASKING ile.
@@ -615,6 +1209,25 @@ class UstBeyn:
                 p_maskeli = maske.astype(float)
                 toplam = float(p_maskeli.sum())
             p_maskeli = p_maskeli / toplam
+
+            # Eylem katalogu, gerçek karar akışına ek fayda olarak bağlanır:
+            # araç önerisi, uygun ve güvenli komuta öngörülü bir önyargı verir.
+            # Bu, katalogun “yalnızca bilgi” olarak kalmasını engeller.
+            tool_name, tool_score, tool_ok = self.en_iyi_eylem_sec(x)
+            tool_idx = self._eylem_komut_hint(x)
+            if tool_ok and tool_idx != KOMUT_INDEKSI[KOMUT_YOK] and maske[tool_idx]:
+                tool_bias = 0.12 + 0.18 * max(0.0, min(1.0, tool_score))
+                p_maskeli[tool_idx] += tool_bias
+                p_maskeli = p_maskeli / float(p_maskeli.sum())
+                self.kisa_hafiza.append({
+                    "komut": KOMUTLAR[tool_idx],
+                    "idx": int(tool_idx),
+                    "confidence": float(tool_bias),
+                    "baglam": self.baglam_anahtari(x),
+                    "source": "tool_bias",
+                    "tool_name": tool_name,
+                    "tool_score": float(tool_score),
+                })
             idx = int(np.argmax(p_maskeli))
 
         # Marj NORMALİZE EDİLMİŞ dağılımdan hesaplanır.
@@ -631,8 +1244,30 @@ class UstBeyn:
         # gerçek farkı ölçer: "uygun komutlar arasında ne kadar
         # belirgin bir tercih var?"
         p_guven = p_maskeli
-        return (KOMUTLAR[idx], idx,
-                self._guven_hesapla(p_guven, idx), "model")
+        safety_conf = float(self._guven_hesapla(p_guven, idx))
+        hedef_bonus = self._hedef_oncelik_puani(x, idx)
+        dunya_bonus = self._dunya_model_tahmini(x, idx)
+        self._ozben_durumu(x)
+        ozben_ayari = self.ozben_modeli.get("istikrar", 0.5)
+        if self.ozben_modeli.get("durum") == "kritik":
+            ozben_ayari *= 0.5
+        elif self.ozben_modeli.get("durum") == "kararsiz":
+            ozben_ayari *= 0.8
+        confidence = min(1.0, safety_conf + 0.18 * hedef_bonus + 0.12 * max(0.0, dunya_bonus))
+        confidence *= 0.7 + 0.3 * max(0.0, min(1.0, ozben_ayari))
+        self.last_confidence = confidence
+        self.last_komut_idx = idx
+        self.kisa_hafiza.append({
+            "komut": KOMUTLAR[idx],
+            "idx": int(idx),
+            "confidence": confidence,
+            "baglam": self.baglam_anahtari(np.asarray(sinyal_vektor, dtype=float)),
+            "source": "model",
+            "hedef_bonus": hedef_bonus,
+            "dunya_bonus": dunya_bonus,
+            "self_state": self.ozben_modeli,
+        })
+        return (KOMUTLAR[idx], idx, confidence, "model")
 
     # --------------------------------------------------------------- Güvenlik
     def komut_uygulanabilir_mi(self, komut_idx, guven, kaynak="model",
@@ -668,18 +1303,42 @@ class UstBeyn:
                     komut_idx, sinyal_vektor):
                 return False, "kesif_gecersiz"
             return True, "kesif_deneme"
+        # Kilitlenme kırıcı (deadlock breaker): aynı komut ardışık olarak
+        # RED_SERI_MAKS kez reddedilirse, eşikleri geçici olarak düşürerek
+        # cold-startı kırmaya çalışır. Doğrulama puanı 0'dan başladığı için
+        # şartlı reddetme sonsuza dek sürerdi ve sistem kilitlenirdi.
+        cooldown_kaldi = self.redd_cooldown[komut_idx]
+        if cooldown_kaldi > 0:
+            self.redd_cooldown[komut_idx] = max(0, cooldown_kaldi - 1)
+            guven_esik = self.guven_esigi * 0.4
+            dogrulama_esik = self.dogrulama_esigi * 0.4
+        else:
+            guven_esik = self.guven_esigi
+            dogrulama_esik = self.dogrulama_esigi
         # ÖN KOŞUL KONTROLÜ: komutun bu bağlamda anlamlı olup
         # olmadığı. Koşul sağlanmıyorsa komut doğrulanmış olsa bile
         # UYGULANMAZ (durum uyumsuzluğu). "acil_dinlen" tehlike
         # yokken onaylanmamalıdır.
         if sinyal_vektor is not None:
             if not self.komut_uygun_mu(komut_idx, sinyal_vektor):
+                self.redd_serisi[komut_idx] += 1
+                if self.redd_serisi[komut_idx] >= self.RED_SERI_MAKS:
+                    self.redd_cooldown[komut_idx] = 5
                 return False, "kosul_saglanmadi"
-        if guven < self.guven_esigi:
+        if guven < guven_esik:
+            self.redd_serisi[komut_idx] += 1
+            if self.redd_serisi[komut_idx] >= self.RED_SERI_MAKS:
+                self.redd_cooldown[komut_idx] = 5
             return False, "guven_yetersiz"
         puan = self._dogrulama_puani(komut_idx, sinyal_vektor)
-        if puan < self.dogrulama_esigi:
+        if puan < dogrulama_esik:
+            self.redd_serisi[komut_idx] += 1
+            if self.redd_serisi[komut_idx] >= self.RED_SERI_MAKS:
+                self.redd_cooldown[komut_idx] = 5
             return False, "dogrulanmadi"
+        # Başarılı onay: redd sayacını ve cooldown'ı sıfırla.
+        self.redd_serisi[komut_idx] = 0
+        self.redd_cooldown[komut_idx] = 0
         return True, "onaylandi"
 
     # --------------------------------------------------------------- Öğren
@@ -711,6 +1370,7 @@ class UstBeyn:
         """
         x = np.array(sinyal_vektor, dtype=float)
         odul = max(-1.0, min(1.0, float(odul)))
+        self._uzun_hafizayi_guncelle(komut_indeksi, odul)
 
         hedef = np.zeros(CIKIS_BOYUT, dtype=float)
         if komut_indeksi == KOMUT_INDEKSI[KOMUT_YOK] and odul >= 0.0:
@@ -754,6 +1414,9 @@ class UstBeyn:
             if self.epsilon > self.epsilon_min:
                 self.epsilon *= self.epsilon_decay
             return
+        if odul < 0.0:
+            self._kaydet_hata("neg_odul", komut_indeksi, sinyal_vektor)
+
         if odul >= 0.0:
             # ÖDÜL → seçilen sınıfı hedefle (yumuşak etiket).
             #
@@ -871,6 +1534,7 @@ class UstBeyn:
                 # (geçersiz hedef vektörü oluşmaz).
                 hedef[komut_indeksi] = 1.0
 
+        self._dunya_model_guncelle(x, komut_indeksi, odul)
         self.mlp.backward(x, hedef, lr=0.05)
         self.secim_sayilari[komut_indeksi] += 1
         self.samples += 1
@@ -959,6 +1623,7 @@ class UstBeyn:
         """
         if komut_indeksi == KOMUT_INDEKSI[KOMUT_YOK]:
             return 0
+        self._kaydet_hata("reddedildi", komut_indeksi, sinyal_vektor)
         self.reddedilen_sayilari[komut_indeksi] += 1
         self.redd_serisi[komut_indeksi] += 1
         if self.redd_serisi[komut_indeksi] >= self.RED_SERI_MAKS:
@@ -991,12 +1656,126 @@ class UstBeyn:
             return self.son_komut
         return KOMUT_YOK
 
+    # --------------------------------------------------------------- ASM Öğrenme
+    def asm_sistemi(self):
+        """Assembly öğrenme organını lazy başlatır ve döndürür.
+
+        ``uzuv.asm_ogren`` modülü (beam search + x86-64 emülatör + gerçek
+        makine doğrulaması) üst beyinle bağlanır. Normal işletmede bu
+        sistem başlatılmaz; ilk ``asm_*`` çağrısında oluşur ve thereafter
+        önbellekte tutulur.
+        """
+        if self._asm_öğrenici is not None:
+            return self._asm_öğrenici
+        from uzuv.asm_ogren import (  # lazy import: circular-import riski yok
+            AssemblyLearner,
+            Emulator,
+            LearningState,
+            CURRICULUM,
+            OPS,
+        )
+        from uzuv.asm_uzuv import AsmUzuv
+
+        asm = AsmUzuv(root=self.root)
+        durum_yol = self.root / "uzuv" / "asm_ogren.json"
+        durum = LearningState(durum_yol)
+        durum.load()
+        emulator = Emulator()
+        asm_rng = random.Random(self.seed ^ 0xA5A5A5A5)
+        self._asm_öğrenici = AssemblyLearner(
+            asm, durum, CURRICULUM, OPS, emulator, asm_rng
+        )
+        return self._asm_öğrenici
+
+    def asm_öğren(self, dakika=1.0, nn_ana=None, stim_ust=None):
+        """Assembly öğrenme döngüsünü ``dakika`` sürece çalıştırır.
+
+        Gerçek makinede doğrulanarak x86-64 program çözümleri üretir ve
+        kalıcı duruma (``uzuv/asm_ogren.json``) yazar.
+
+        nn_ana ve stim_ust verildiğinde beam search araması nöral beyin
+        tarafından yönlendirilir (hibrit öğrenme).
+        """
+        learner = self.asm_sistemi()
+        history_start = len(learner.state.history)
+        primitives_before = sum(len(v) for v in learner.state.primitives.values())
+        dakika = max(0.0, float(dakika))
+        learner.run(dakika, nn_ana=nn_ana, stim_features=stim_ust)
+        st = learner.state
+        session = st.history[history_start:]
+        return {
+            "toplam_gorev": st.total_tasks,
+            "maks_seviye": st.max_level,
+            "primtik": sum(len(v) for v in st.primitives.values()),
+            "oturum_gorev": len(session),
+            "oturum_cozulen": sum(bool(item.get("cozuldu")) for item in session),
+            "yeni_primtik": sum(len(v) for v in st.primitives.values()) - primitives_before,
+            "basarisiz_kumbara": sum(len(s) for s in st.failures.values()),
+        }
+
+    def asm_rapor(self):
+        """Assembly öğrenme özetini konsola yazar."""
+        learner = self.asm_sistemi()
+        learner.report()
+
+    def asm_kod_dene(self, kod, hedef, başlangıç=None):
+        """Tek assembly kodunu gerçek makinede doğrular.
+
+        ``hedef``: {yazmac: değer, ...} sözlüğü (rsp hariç).
+        Dönen: {'dogru': bool, 'surpriz': float, 'fark': {...}}
+        """
+        learner = self.asm_sistemi()
+        asm = learner.asm
+        if başlangıç is None:
+            başlangıç = {r: 0 for r in learner.emulator.registers}
+        return asm.tahmin_dene(kod, hedef, başlangıç)
+
+    def asm_istatistik(self):
+        """Assembly öğrenme istatistiklerini döndürür (yazma işlemi yok)."""
+        if self._asm_öğrenici is None:
+            return {"hazır": False}
+        learner = self.asm_sistemi()
+        st = learner.state
+        return {
+            "hazır": True,
+            "toplam_gorev": st.total_tasks,
+            "maks_seviye": st.max_level,
+            "primtik": sum(len(v) for v in st.primitives.values()),
+            "baglam": len(st.weights.records),
+        }
+
+    def asm_ornek_coz(
+        self,
+        egitim,
+        dogrulama,
+        seviye=1,
+        azami_komut=None,
+        butce=10000,
+        zaman_asimi=10.0,
+    ):
+        """Verilen girdi/çıktı örneklerinden program arar ve ayrı örneklerde doğrular."""
+        sonuc = self.asm_sistemi().solve_examples(
+            egitim,
+            dogrulama,
+            level=seviye,
+            max_length=azami_komut,
+            budget=butce,
+            timeout_seconds=zaman_asimi,
+        )
+        return {
+            "cozuldu": sonuc.solved,
+            "program": sonuc.program,
+            "deneme": sonuc.attempts,
+            "emulator_uyusmazligi": sonuc.emulator_mismatch,
+            "zaman_asimi": sonuc.timed_out,
+        }
+
     # --------------------------------------------------------------- Kalıcılık
     def save(self):
         yol = self.root / "zeka" / "ust_beyn.json"
         yol.parent.mkdir(parents=True, exist_ok=True)
         data = {
-            "surum": 2,
+            "surum": UST_MODEL_SURUMU,
             "W1": self.mlp.W1.tolist(),
             "b1": self.mlp.b1.tolist(),
             "W2": self.mlp.W2.tolist(),
@@ -1006,6 +1785,16 @@ class UstBeyn:
             "epsilon": self.epsilon,
             "secim_sayilari": self.secim_sayilari,
             "dogrulama": self.dogrulama,
+            "mizac": self.mizac,
+            "kisa_hafiza": list(self.kisa_hafiza),
+            "hata_kategorisi": self.hata_kategorisi,
+            "last_confidence": self.last_confidence,
+            "last_komut_idx": self.last_komut_idx,
+            "dunya_modeli": self.dunya_modeli,
+            "ozben_modeli": self.ozben_modeli,
+            "kimlik": self.kimlik,
+            "deger_profili": self.deger_profili,
+            "uzun_hafiza": self.uzun_hafiza,
             # Bağlam bazlı doğrulama puanları.
             # JSON'da anahtar (komut_idx, baglam) çifti → DİZİ
             # dönüştürülür, çünkü JSON nesne anahtarı tuple olamaz.
@@ -1020,6 +1809,10 @@ class UstBeyn:
             "sure_azami": self.sure_azami,
             "reddedilen": self.reddedilen,
         }
+        # ASM öğrenme durumu (varsa) üst beyin kayıtına eşlik eder.
+        if self._asm_öğrenici is not None:
+            self._asm_öğrenici.state.save()
+
         tmp = yol.with_name(yol.name + ".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         os.replace(str(tmp), str(yol))
@@ -1030,6 +1823,7 @@ class UstBeyn:
             return 0
         try:
             data = json.loads(yol.read_text(encoding="utf-8"))
+            model_surumu = int(data.get("surum", 1))
             W2 = np.array(data["W2"], dtype=float)
             b2 = np.array(data["b2"], dtype=float)
             # Eski kayıtta sifirla (7. çıktı) varsa ve CIKIS_BOYUT=6 ise,
@@ -1042,7 +1836,16 @@ class UstBeyn:
                 pad = CIKIS_BOYUT - W2.shape[0]
                 W2 = np.vstack([W2, np.zeros((pad, W2.shape[1]))])
                 b2 = np.concatenate([b2, np.zeros(pad)])
-            self.mlp.W1 = np.array(data["W1"], dtype=float)
+            W1 = np.array(data["W1"], dtype=float)
+            if model_surumu < UST_MODEL_SURUMU:
+                W1[:, IDX_ENERJI] *= 3.0
+            # Yeni SINYAL_BOYUT (48) ile eski W1 (36 sütun) arasında boyut uyuşmazlığı varsa sıfırla doldur
+            if W1.shape[1] < SINYAL_BOYUT:
+                pad_cols = SINYAL_BOYUT - W1.shape[1]
+                W1 = np.hstack([W1, np.zeros((W1.shape[0], pad_cols))])
+            elif W1.shape[1] > SINYAL_BOYUT:
+                W1 = W1[:, :SINYAL_BOYUT]
+            self.mlp.W1 = W1
             self.mlp.b1 = np.array(data["b1"], dtype=float)
             self.mlp.W2 = W2
             self.mlp.b2 = b2
@@ -1065,7 +1868,46 @@ class UstBeyn:
                     # Eski kayıt (6 elemanlı, sifirla eksik) → sıfır padding
                     dogr = dogr + [0.0] * (CIKIS_BOYUT - len(dogr))
             self.dogrulama = dogr or [0.0] * CIKIS_BOYUT
+            self.kisa_hafiza = deque(maxlen=64)
+            for _item in data.get("kisa_hafiza", []):
+                if isinstance(_item, dict):
+                    self.kisa_hafiza.append(_item)
+            self.hata_kategorisi = dict(data.get("hata_kategorisi", {}))
+            self.last_confidence = float(data.get("last_confidence", 0.0))
+            self.last_komut_idx = int(data.get("last_komut_idx", KOMUT_INDEKSI[KOMUT_YOK]))
+            self.dunya_modeli = {}
+            for bag, vals in (data.get("dunya_modeli") or {}).items():
+                try:
+                    parsed = {}
+                    for k, v in (vals or {}).items():
+                        parsed[int(k)] = [float(x) for x in v]
+                    self.dunya_modeli[bag] = parsed
+                except Exception:
+                    continue
+            self.ozben_modeli = data.get("ozben_modeli", {
+                "durum": "hazir",
+                "istikrar": 0.0,
+                "hata_orani": 0.0,
+                "ortalama_odul": 0.0,
+                "guven_duyarliligi": 0.0,
+            })
+            loaded_identity = data.get("kimlik") or {}
+            self.kimlik["ad"] = "Aelaan"
+            self.kimlik["ilkeler"] = loaded_identity.get("ilkeler", self.kimlik["ilkeler"])
+            self.deger_profili.update(data.get("deger_profili") or {})
+            loaded_memory = data.get("uzun_hafiza") or {}
+            self.uzun_hafiza["toplam_sonuc"] = max(0, int(loaded_memory.get("toplam_sonuc", 0)))
+            self.uzun_hafiza["olumlu_sonuc"] = max(0, int(loaded_memory.get("olumlu_sonuc", 0)))
+            self.mizac.update(data.get("mizac") or {})
+            self.uzun_hafiza["olumsuz_sonuc"] = max(0, int(loaded_memory.get("olumsuz_sonuc", 0)))
+            self.uzun_hafiza["odul_toplami"] = float(loaded_memory.get("odul_toplami", 0.0))
+            self.uzun_hafiza["komutlar"] = {
+                str(ad): {"sayi": max(0, int(veri.get("sayi", 0))),
+                          "odul_toplami": float(veri.get("odul_toplami", 0.0))}
+                for ad, veri in (loaded_memory.get("komutlar") or {}).items()
+                if isinstance(veri, dict)
             # Bağlam bazlı puanlar geri yüklenir. ESKİ kayıtlarda bu
+            }
             # alan YOKTUR → geriye dönük uyum için boş bırakılır
             # (global puan kullanılır, davranış bozulmaz).
             self.dogrulama_bağlam = {}
@@ -1105,14 +1947,22 @@ def topla_sinyalleri(drives, mind, dam, guv, surec,
                      feats_damak=None, E=None, H=None,
                      sarsinti=0.0, yemek_var=False,
                      gorev_aktif=False, surpriz=0.0,
-                     dunya_bozuk=False, olum_feats=None):
+                     dunya_bozuk=False, olum_feats=None,
+                     # ---------- Yeni: Beden duyuları (Aşama 1) ----------
+                     cpu_yuk=0.0, proses_norm=0.0,
+                     disk_yuzde_norm=0.0, bellek_yuzde_norm=0.0,
+                     usb_cihaz_norm=0.0, usb_keşif_bonusu=0.0,
+                     ag_baglanti_norm=0.0, insan_var=False,
+                     sistem_saati_norm=0.0,
+                     disk_baski=0.0, bellek_baski=0.0,
+                     beden_baski=0.0):
     """Tüm alt sistemlerden tek bir SINYAL_BOYUT'luk vektör üretir (pure Python)."""
 
-    e_cap = 150.0
-    energy = float(getattr(drives, "energy", 50)) / e_cap
-    hunger = float(getattr(drives, "hunger", 10)) / 100.0
-    pain = float(drives.pain()) if hasattr(drives, "pain") else 0.0
-    sikilma = float(getattr(drives, "sikilma", 0.0))
+    e_cap = max(1.0, float(getattr(drives, "energy_cap", 150.0)))
+    energy = _clamp01(float(getattr(drives, "energy", 50)) / e_cap)
+    hunger = _clamp01(float(getattr(drives, "hunger", 10)) / 100.0)
+    pain = _clamp01(float(drives.pain())) if hasattr(drives, "pain") else 0.0
+    sikilma = _clamp01(float(getattr(drives, "sikilma", 0.0)))
     in_danger = 1.0 if getattr(drives, "in_danger", False) else 0.0
     alive = 1.0 if getattr(drives, "alive", True) else 0.0
 
@@ -1166,6 +2016,10 @@ def topla_sinyalleri(drives, mind, dam, guv, surec,
         yeni_n = float(len(getattr(surec, "yeni", [])))
         toplam = float(getattr(surec, "ornek", 1) or 1)
         anomaly = (eksik_n + yeni_n) / max(1.0, toplam)
+        anomaly = _clamp01(max(
+            anomaly,
+            float(getattr(surec, "degisim_skoru", 0.0)),
+        ))
     else:
         eksik_n = yeni_n = anomaly = 0.0
 
@@ -1213,11 +2067,33 @@ def topla_sinyalleri(drives, mind, dam, guv, surec,
     surpriz_v = _clamp01(surpriz / 5.0)
     gorev_v = 1.0 if gorev_aktif else 0.0
 
+    # ---------- Yeni: Duygu sinyalleri (Aşama 6) ----------
+    mood = getattr(drives, "mood", None) or {}
+    mood_mutluluk = float(mood.get("mutluluk", 0.5))
+    mood_korku = float(mood.get("korku", 0.0))
+    mood_merak = float(mood.get("merak", 0.3))
+
     ctx_map = {"start": 0, "door": 1, "act": 2, "eat": 3,
                "console": 4, "rest": 5}
     ctx_vec = [0.0] * 6
     if context in ctx_map:
         ctx_vec[ctx_map[context]] = 1.0
+
+    # ---------- Yeni: Beden duyuları (Aşama 1) ----------
+    cpu_yuk = _clamp01(cpu_yuk)
+    proses_norm = _clamp01(proses_norm)
+    disk_yuzde_norm = _clamp01(disk_yuzde_norm)
+    bellek_yuzde_norm = _clamp01(bellek_yuzde_norm)
+    usb_cihaz_norm = _clamp01(usb_cihaz_norm)
+    usb_keşif_bonusu = _clamp01(usb_keşif_bonusu)
+    ag_baglanti_norm = _clamp01(ag_baglanti_norm)
+    sistem_saati_norm = _clamp01(sistem_saati_norm)
+    disk_baski = _clamp01(disk_baski)
+    bellek_baski = _clamp01(bellek_baski)
+    beden_baski = _clamp01(beden_baski)
+    insan_var_v = 1.0 if insan_var else 0.0
+
+    asm_ogren_v = 1.0 if asm_ogren else 0.0
 
     v = [
         energy, hunger, pain, sikilma, in_danger, alive,
@@ -1229,7 +2105,14 @@ def topla_sinyalleri(drives, mind, dam, guv, surec,
         shock_pending, mesaj_var, shock_miktar,
         olum_risk,
         dunya_bozuk_v, surpriz_v, gorev_v,
-    ] + ctx_vec
+    ] + ctx_vec + [mood_mutluluk, mood_korku, mood_merak,
+                   cpu_yuk, proses_norm,
+                   disk_yuzde_norm, bellek_yuzde_norm,
+                   usb_cihaz_norm, usb_keşif_bonusu,
+                   ag_baglanti_norm, insan_var_v,
+                   sistem_saati_norm,
+                   disk_baski, bellek_baski, beden_baski,
+                   asm_ogren_v]
 
     while len(v) < SINYAL_BOYUT:
         v.append(0.0)

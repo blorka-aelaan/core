@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
-  al, post, Vital, Atolye, Kullan, Ag, Beyin, Uyku, Uzuv, Ders, Kapi, Akim, UstBeyn, sure,
+  al, post, Vital, Evren, Atolye, Kullan, Ag, Beyin, Uyku, Uzuv, Ders, Kapi, Akim, UstBeyn, AsmOgren, KodDurum, sure,
+  YerelSurec, Hatalar, Neden, DisSal,
 } from "./panels.jsx";
 
 // ---------- canlı pano bağlamı: SSE + ilk yükleme ----------
@@ -63,9 +64,21 @@ export default function App() {
     setTimeout(() => setNot(null), 8000);
   }
 
-  const c = durum?.canli, s = durum?.servisler;
+  const c = durum?.canli, s = durum?.servisler, sistem = durum?.sistem;
+  const uyariMetni = Array.isArray(sistem?.uyari)
+    ? sistem.uyari.join(' · ')
+    : (typeof sistem?.uyari === 'string' && sistem.uyari.trim().length > 0
+      ? sistem.uyari
+      : 'bilinmeyen durum');
   return (
     <>
+      {sistem && (
+        <div className={"not11 " + (sistem.durum === "degraded" ? "hata" : sistem.durum === "bekleniyor" ? "soluk" : "ok")} style={{ marginBottom: 8 }}>
+          {sistem.durum === "güvenilir" && "sistem durumu: güvenilir"}
+          {sistem.durum === "bekleniyor" && "sistem durumu: bekleniyor / veri henüz oluşmadı"}
+          {sistem.durum === "degraded" && (`sistem durumu: degraded — ${uyariMetni}`)}
+        </div>
+      )}
       <div className="baslik">
         <h1>CORE</h1>
         <span>
@@ -102,20 +115,27 @@ export default function App() {
       <div className="izgara">
         <div className="sutun">
           <Vital d={durum} />
+          {durum && <Evren d={durum} />}
+          {durum && <YerelSurec d={durum} />}
           {durum && <Atolye d={durum} />}
           {durum && <Kullan d={durum} />}
-          {durum && <Ag d={durum} />}
         </div>
         <div className="sutun">
           {durum && <UstBeyn d={durum} />}
+          {durum && <AsmOgren d={durum} />}
           {durum && <Beyin d={durum} />}
           {durum && <Uzuv d={durum} />}
           {durum && <Ders d={durum} />}
-          <Kapi />
-          {durum && <Uyku d={durum} />}
+          {durum && <Hatalar d={durum} />}
+          {durum && <Neden d={durum} />}
+          {durum && <DisSal d={durum} />}
         </div>
         <div className="sutun">
           <Akim olaylar={olaylar} bagli={bagli} />
+          <Kapi />
+          {durum && <Uyku d={durum} />}
+          {durum && <KodDurum d={durum} />}
+          {durum && <Ag d={durum} />}
         </div>
       </div>
     </>

@@ -15,10 +15,13 @@ girdisi olarak kullanılır; komut artık el ile yazılmıyor, öğreniliyor.
      door mesajına göre komut seçmeyi öğrenir.
 """
 import json
+import math
 import threading
 import time
 import numpy as np
 from pathlib import Path
+
+from ust_beyn import SINYAL_SURUMU
 
 
 class SelfTrainer:
@@ -39,6 +42,8 @@ class SelfTrainer:
         self._stop = threading.Event()
         self._thread = None
         self._offset = 0
+        self._journal_identity = None
+        self.rejected_samples = 0
         # Bellekteki eğitim havuzu: (sinyal_list, komut_idx, odul)
         self._samples = []
         self._cmd_to_idx = None  # main'dan set edilecek
@@ -64,11 +69,13 @@ class SelfTrainer:
     def train(self):
         """Yeni journal kayıtlarını derleyip MLP'yi eğitir."""
         new_samples = self._collect()
-        if len(new_samples) < self.min_samples:
+        if not new_samples:
             return
         self._samples.extend(new_samples)
         if len(self._samples) > self.max_samples:
             self._samples = self._samples[-self.max_samples:]
+        if len(self._samples) < self.min_samples:
+            return
 
         rng = np.random.RandomState(int(time.time()) % 2**31)
         for _ in range(self.epochs):
@@ -83,6 +90,11 @@ class SelfTrainer:
         samples = []
         if not self.journal_path.exists():
             return samples
+        stat = self.journal_path.stat()
+        identity = (stat.st_dev, stat.st_ino)
+        if identity != self._journal_identity or stat.st_size < self._offset:
+            self._offset = 0
+            self._journal_identity = identity
         # Önceki sec() kararlarını ve sonraki kullan() kayıtlarını eşleştir.
         # Anahtar: (tick, komut_adı)
         sec_decision = {}   # (tick, komut) -> sinyal_vektor
@@ -91,8 +103,12 @@ class SelfTrainer:
         with open(self.journal_path, "r", encoding="utf-8") as f:
             f.seek(self._offset)
             while True:
+                satir_baslangici = f.tell()
                 line = f.readline()
                 if not line:
+                    break
+                if not line.endswith("\n"):
+                    f.seek(satir_baslangici)
                     break
                 line = line.strip()
                 if not line:
@@ -101,22 +117,31 @@ class SelfTrainer:
                     rec = json.loads(line)
                 except ValueError:
                     continue
+                if not isinstance(rec, dict):
+                    self.rejected_samples += 1
+                    continue
                 kind = rec.get("kind")
                 tick = rec.get("t")
 
                 if kind == "ust_beyn_sec":
-                    sec_decision[(tick, rec.get("komut"))] = rec.get("sinyal")
+                    if rec.get("sinyal_surumu") == SINYAL_SURUMU:
+                        sec_decision[(tick, rec.get("komut"))] = rec.get("sinyal")
+                    else:
+                        self.rejected_samples += 1
                 elif kind == "kullan":
                     kullan_records.append((tick, rec.get("komut"),
                                            rec.get("odul", 0.0),
                                            rec.get("dogru", False)))
 
                 elif kind == "ust_ogren":
-                    # Offline replay: (sinyal, komut_idx, ödül) üçlüsü.
                     _s = rec.get("sinyal")
                     _i = rec.get("idx")
-                    if _s is not None and _i is not None:
-                        samples.append((_s, _i, rec.get("odul", 0.0)))
+                    _r = rec.get("odul")
+                    if (rec.get("sinyal_surumu") == SINYAL_SURUMU
+                            and self._gecerli_ornek(_s, _i, _r)):
+                        samples.append((_s, _i, float(_r)))
+                    else:
+                        self.rejected_samples += 1
 
 
             self._offset = f.tell()
@@ -146,8 +171,26 @@ class SelfTrainer:
 
         return samples
 
+    def _gecerli_ornek(self, sinyal, idx, odul):
+        """Bozuk veya model boyutlarıyla uyumsuz günlük satırını reddet."""
+        n_in = int(getattr(self.ust.mlp, "n_in", 36))
+        n_out = int(getattr(self.ust.mlp, "n_out", 0))
+        if (not isinstance(sinyal, list) or len(sinyal) != n_in
+                or isinstance(idx, bool) or not isinstance(idx, int)
+                or idx < 0 or idx >= n_out
+                or isinstance(odul, bool)
+                or not isinstance(odul, (int, float))
+                or not math.isfinite(float(odul))):
+            return False
+        return all(
+            not isinstance(v, bool) and isinstance(v, (int, float))
+            and math.isfinite(float(v))
+            for v in sinyal
+        )
+
     def stats(self):
         return {
             "samples": len(self._samples),
             "offset": self._offset,
+            "rejected_samples": self.rejected_samples,
         }

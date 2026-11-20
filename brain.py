@@ -116,24 +116,30 @@ class Brain:
         # (score>=0 filtresi) giremez, yeniden denenemez ve skoru asla
         # düzelmez: kalıcı kör nokta. Ölçüm (2026-10-19): havuz {rest}'e
         # inince 5.5 saat sıfır görev denemesi.
-        self.EPS_TABAN = 0.05
+        self.EPS_TABAN = 0.03
+        self.KESIF_TAM_BASE = 0.25
         self.KESIF_TAM = 0.25
+        # ---------- Yeni: Tekrar cezası (eylem kilidini bozmak için) ----------
+        # Son 8 eylemi takip eder; aynı eylem tekrarlandığında skor cezası verir.
+        self.recent_actions = deque(maxlen=8)
         # ---------- Yeni: Episodik bellek (kısa vadeli hatıra) ----------
         # Son N (stim, action, reward) etkileşimi; decide'de benzer uyaran
         # için hızlı "hatırlama" boostu sağlar.
-        self.episodic = deque(maxlen=64)
+        self.episodic = deque(maxlen=515)
         # ---------- Yeni: Working memory (decay'li kısa bellek) ----------
         # Son M tikteki (stim, action) çiftleri; her tikte decay uygulanır.
         # Aynı stimuli tekrar eden eylemler için hafif teşvik.
         self.working_memory = {}  # (stim, action) -> strength
-        self.working_decay = 0.95  # her tikte %5 zayıflar
-        self.working_max = 32      # en çok 32 giriş tutulur
+        self.working_decay = 0.97  # her tikte %3 zayıflar (daha uzun hafıza)
+        self.working_max = 256  # en çok 128 giriş tutulur
         # (özellik, eylem) çiftinin kullanım sayısı — alışkanlık/otomatikleştirme
         self.usage = {}
         # DONDURULMUŞ sayaçlar (KÖK NEDEN 3, 2026-10-22): usage sayacı
         # USAGE_DONDURMA'yı aşan girdilerin fazlası buraya taşınır.
         # Amaç: kanıt (usage>=2) SONSUZA DEK korunurken tablo şişmez.
         self.usage_tasma = {}
+        # Working memory ödül takibi: (stim, action) -> gözlenen en iyi ödül
+        self.working_rewards = {}
         # ---------- Yeni: Yapıslé plastisite (nöron büyüme/silme) ----------
         # Sık kullanılan (stim, action) çiftlerine göre sanal nöron ekleme
         self.neuron_id_counter = 0
@@ -172,7 +178,10 @@ class Brain:
         # sahteleri) düz sayı olabilir. İkisi de desteklenir — yoksa
         # düşük enerji yolunda TypeError patlar ve öğrenme durur.
         _pain = getattr(drives, "pain", 0.0)
-        pain = float(_pain() if callable(_pain) else _pain)
+        try:
+            pain = float(_pain() if callable(_pain) else _pain)
+        except (TypeError, ValueError):
+            pain = 0.0
         pain = max(0.0, min(1.0, pain))
         sik = max(0.0, min(1.0, float(getattr(drives, "sikilma", 0.0))))
 
@@ -440,6 +449,29 @@ class Brain:
             return 0.0
         return min(0.5, 0.05 * math.log1p(total))
 
+    def _baglam_kullanim(self, stim, action):
+        """Bağlamın tekil özelliklerinde bu eyleme ait deneyim sayısı."""
+        features, _ = self._bilesen(stim)
+        return sum(
+            self.usage.get((feature, action), 0)
+            + self.usage_tasma.get((feature, action), 0)
+            for feature in features
+        )
+
+    def _az_deneyimliyi_sec(self, stim, actions):
+        """Keşifte aynı bağlamda en az denenmiş eylemler arasından seç."""
+        if len(actions) < 2:
+            return actions[0]
+        evidence = {
+            action: self._baglam_kullanim(stim, action)
+            for action in actions
+        }
+        en_az = min(evidence.values())
+        candidates = [
+            action for action, count in evidence.items() if count == en_az
+        ]
+        return self.rng.choice(candidates)
+
     # ---------- Working memory (Aşama 3) ----------
 
     @staticmethod
@@ -491,19 +523,24 @@ class Brain:
         sinif_idx = min(len(SINIFLAR) - 1, max(0, int((energy - 50) / 15)))
         return (puan, sinif_idx)
 
-    def working_remember(self, stim, action, strength=1.0):
+    def working_remember(self, stim, action, strength=1.0, reward=0.0):
         """Son (stim, action) denemesini çalışma belleğine yazar.
 
         decide() bu çiftlere küçük bir teşvik boostu verir; aynı uyaranla
         zincir içi tekrar deneme etkileşimi bu şekilde kalıcı kalır.
+        reward, uyku konsolidasyonunda (calisma_bellekten_konsolide)
+        hangi girişlerin uzun belleğe yazılacağına karar vermek için kullanılır.
         working_max'i geçildiğinde en zayıf giriş silinir.
         """
         key = (stim, action)
         self.working_memory[key] = max(
             float(strength), self.working_memory.get(key, 0.0))
+        if reward > self.working_rewards.get(key, float("-inf")):
+            self.working_rewards[key] = float(reward)
         if len(self.working_memory) > self.working_max:
-            worst = min(self.working_memory, key=self.working_memory.get)
+            worst = min(self.working_memory, key=lambda k: self.working_memory.get(k, 0.0))
             del self.working_memory[worst]
+            self.working_rewards.pop(worst, None)
 
     def working_sindir(self):
         """Her tikte bir çağrılır: çalışma belleğini yavaşça sındırır.
@@ -518,8 +555,42 @@ class Brain:
                    if v * d < 0.01]
         for k in silinen:
             del self.working_memory[k]
+            self.working_rewards.pop(k, None)
         for k in self.working_memory:
             self.working_memory[k] *= d
+
+    def calisma_bellekten_konsolide(
+        self, strength_esik: float = 0.5, odul_esik: float = 0.0,
+        lr_carpan: float = 0.5
+    ) -> int:
+        """Çalışma belleğindeki güçlü ve ödüllü girişleri uzun belleğe yazar.
+
+        Uyku sırasında çağrılır. strength_esik üzeri ve odul_esik üzeri
+        (stim, action) çiftleri brain.w'ye kalıcı bağlantı olarak eklenir.
+        Konsolidasyon sonrası çalışma belleği temizlenir (zaten uzun bellekte).
+
+        Döner: konsolide edilen giriş sayısı.
+        """
+        konsolide_edilen = 0
+        for (stim, action), strength in list(self.working_memory.items()):
+            if strength < strength_esik:
+                continue
+            odul = self.working_rewards.get((stim, action), 0.0)
+            if odul < odul_esik:
+                continue
+            # Kalıcı ağırlık olarak yaz: delta kuralı ile aynı mantık
+            feats = self.features(stim)
+            err = odul - self.score(stim, action)
+            pay = self.lr * err * lr_carpan / max(1, len(feats))
+            for f in feats:
+                key = (f, action)
+                self._yaz(key, pay)
+                self.record_usage(stim, action)
+            konsolide_edilen += 1
+        # Konsolidasyon sonrası çalışma belleğini temizle
+        self.working_memory.clear()
+        self.working_rewards.clear()
+        return konsolide_edilen
 
     def stimulus(self, drives, context, loc="", last_food="-", gorev=None,
                  sistem=None, son=None, deneme=None, ara=None,
@@ -619,7 +690,7 @@ class Brain:
         # tarafsız başlangıç: her eylem 0'dan, eşitlikte rastgele
         return self.w.get((feat, action), 0.0)
 
-    def decide(self, stim, feasible):
+    def decide(self, stim, feasible, dusun_bonus=0.0, dusun_act=None):
         """Keşif güvene bağlı: ε_eff = ε / (1 + marj).
 
         Marj = en iyi − ikinci skor. Sıfırken (hiçbir şey bilinmiyor)
@@ -637,6 +708,8 @@ class Brain:
           küçük bir "hatırlama" boostu eklenir.
         - Alışkanlık boostu: sık kullanılan (özellik, eylem) çiftlerine
           logaritmik familiarity artışı.
+        - Düşünme tahmini entegrasyonu: dusun_act'e dusun_bonus eklenir,
+          bu sayede deneyim öncesi simülasyon doğrudan kararları etkiler.
         """
         if not feasible:
             self.son_kesif = True
@@ -653,12 +726,24 @@ class Brain:
             # 1) Episodik hatıra boostu (kısa vadeli bağlamsal bellek)
             if recalled is not None and a == recalled:
                 boost += 0.25
-            # 2) Working memory boost (yakın geçmişte denenen eylemler)
+            # 2) Working memory: başarılıysa teşvik, başarısızsa ceza
             wm_key = (stim, a)
             if wm_key in self.working_memory:
-                boost += 0.15 * self.working_memory[wm_key]
-            # 3) Alışkanlık / otomatikleştirme boostu (sık kullanılan çiftler)
+                wm_str = self.working_memory[wm_key]
+                wm_odul = self.working_rewards.get(wm_key, 0.0)
+                if wm_odul > 0:
+                    boost += 0.15 * wm_str  # başarılı yakın geçmişteki eylemi teşvik et
+                else:
+                    boost -= 0.20 * wm_str  # başarısız yakın geçmişteki eylemi cezala
+            # 3) Tekrar cezası: aynı eylem son 8 tikte kaç kez varsa o kadar ceza
+            tekrar = sum(1 for prev in self.recent_actions if prev == a)
+            if tekrar > 0:
+                boost -= 0.20 * tekrar  # her tekrar için -0.20 skor cezası
+            # 4) Alışkanlık / otomatikleştirme boostu (sık kullanılan çiftler)
             boost += self.familiarity_boost(stim, a)
+            # 5) Düşünme tahmini entegrasyonu: simülasyon önerdiği eyleme bonus
+            if dusun_act is not None and a == dusun_act:
+                boost += dusun_bonus
             scores.append((base + boost, a))
         sirali = sorted((s for s, _ in scores), reverse=True)
         marj = sirali[0] - sirali[1] if len(sirali) > 1 else 0.0
@@ -669,6 +754,13 @@ class Brain:
         # sıkılma (Aşama 4): rutin doygunluk keşif baskısını yükseltir;
         # yenilik buldukça söner → kendi kendini dengeleyen merak
         eps = min(0.95, eps + 0.3 * max(0.0, self.sikilma))
+        # KESIF_TAM dinamik: son 8 eylemde aynı eylem baskınsa tam havuz oranını artır
+        if self.recent_actions:
+            en_cok = max(self.recent_actions.count(a) for a in set(self.recent_actions))
+            if en_cok >= 4:  # %50'den fazla aynı eylem
+                self.KESIF_TAM = min(0.70, self.KESIF_TAM_BASE + 0.25)
+            else:
+                self.KESIF_TAM = self.KESIF_TAM_BASE
         self.son_kesif = self.rng.random() < eps
         if self.son_kesif:
             # Aşama 1 — akıllı keşif havuzu: keşif artık rastgele değil,
@@ -687,13 +779,34 @@ class Brain:
             # üretir (havuz {rest}'e inince 5.5 saat sıfır görev).
             if havuz is not feasible and self.rng.random() < self.KESIF_TAM:
                 havuz = feasible
-            return self.rng.choice(havuz)
-        cands = [a for s, a in scores if s == sirali[0]]
-        return self.rng.choice(cands)
+            secilen = self._az_deneyimliyi_sec(stim, havuz)
+        else:
+            cands = [a for s, a in scores if s == sirali[0]]
+            secilen = self.rng.choice(cands)
+        # Seçilen eylemi tekrar takibine kaydet
+        self.recent_actions.append(secilen)
+        return secilen
 
     def score(self, stim, action):
         """Eylemin bu uyaran için toplam skoru (özellik ağırlıkları toplamı)."""
         return sum(self._get(f, action) for f in self.features(stim))
+
+    def guven(self, stim, action) -> float:
+        """Destek bazlı güven skoru: 0 (hiç kanıt yok) .. 1 (yeterli kanıt).
+
+        Kullanım sayısına dayanır: PRUNE_USAGE_MIN (2) kullanımdan sonra
+        güven 1.0'e doğru yaklaşır. Ağırlık büyüklüğü güveni etkilemez;
+        sadece 'bu bağlantı denemiş mi / ne kadar denemiş' bilgisini verir.
+
+        `usage` (ve `usage_tasma`) `(özellik, eylem)` anahtarılıdır, dolayı
+        güven bu uyaranın tüm tekil özellikleri üzerindeki toplam
+        kullanımdan hesaplanır (aynı aggregation `_baglam_kullanim` ile).
+        """
+        kullan = self._baglam_kullanim(stim, action)
+        if kullan == 0:
+            return 0.0
+        # PRUNE_USAGE_MIN = 2'den itibaren yavaşça 1.0'e yaklaşan eğri
+        return min(1.0, kullan / (kullan + self.PRUNE_USAGE_MIN))
 
     def _yaz(self, key, pay):
         """Bağlantıyı güncelle: hafif sönüm + kırpma (S5 şişme koruması)."""
@@ -715,10 +828,13 @@ class Brain:
         - Etkileşim episodik belleğe kaydedilir (kısa vadeli hatıra).
         - (özellik, eylem) kullanım sayısı artırılır (alışkanlık boostu).
         """
-        reward = max(-20.0, min(40.0, reward))
+        reward = max(-50.0, min(80.0, reward))
         # Episodik bellek ve kullanım kaydı (yeni)
         self.episodic_push(stim, action, reward)
         self.record_usage(stim, action)
+        # Eski beyin dosyalarında birikmiş çapraz kanıt temizliği (KÖK NEDEN 4):
+        # kanıtsız çaprazlar konsolidasyonda budanabilir, tablo şişmez.
+        self._capraz_kullanim_temizle()
         p, carpraz = self._bilesen(stim)
         err = reward - self.score(stim, action)
         lr_efektif = self.lr * 1.5 if r_merak > 0 else self.lr
@@ -955,6 +1071,107 @@ class Brain:
                 silinen += 1
         return silinen
 
+    # ------------------------------------------------- Faz 6: uyku-temelli soyutlama
+
+    def _stim_kalip(self, stim: str) -> str:
+        """Stimül kalıbını çıkarır: belirli değerleri '*' ile değiştirir.
+
+        Örn. "L|oda_12|e:5|h:A|gorev:DOSYA_BUL" → "L|*|e:*|h:*|gorev:*"
+        Bu sayede benzer bağlamlardaki eylemler tek kural altında toplanır.
+        """
+        parcalar = stim.split("|")
+        kalip = []
+        for p in parcalar:
+            # Harf jetonları (L/M/H, A/O/T, L/M/H-A/O/T) korunur,
+            # geriye kalanı '*' ile değiştir (konum, isim, sayı vb.)
+            if p in ("L", "M", "H", "A", "O", "T",
+                     "L-A", "L-O", "L-T", "M-A", "M-O", "M-T",
+                     "H-A", "H-O", "H-T"):
+                kalip.append(p)
+            elif p.startswith(("e:", "h:")):
+                kalip.append(p[:2] + "*")
+            else:
+                kalip.append("*")
+        return "|".join(kalip)
+
+    def grupla_ve_ozet(
+        self, grup_esik: int = 3, odul_esik: float = 0.5,
+        kritik_odul: float = 3.0, lr_carpan: float = 0.4
+    ) -> int:
+        """Benzer stimül kovalarını gruplayıp genel (soyut) kural çıkar.
+
+        Uyku sırasında çağrılır. Aynı kalıba uyan (stim, action) çiftleri
+        toplanır; yeterli örnek (≥ grup_esik) ve ortalama ödül (≥ odul_esik)
+        varsa "GENEL:<kalıp>:<eylem>" kuralı yazılır. Bu sayede organizma
+        tek bir deneyimi farklı konumlara/koşullara genelleyebilir.
+
+        Nadir ama kritik deneyimler (|R| ≥ kritik_odul) asla silinmez,
+        soyutlama tarafından ezilmez.
+
+        Döner: oluşturulan abstract kural sayısı.
+        """
+        # 1. (stim, action) çiftlerini kalıba göre grupla
+        gruplar: dict[str, dict[str, list[float]]] = {}
+        for (stim, action), usage in self.usage.items():
+            if usage < 1:
+                continue
+            kalip = self._stim_kalip(stim)
+            anahtar = f"{kalip}|{action}"
+            if anahtar not in gruplar:
+                gruplar[anahtar] = {"stims": [], "oduller": [], "usages": []}
+            gruplar[anahtar]["stims"].append(stim)
+            gruplar[anahtar]["usages"].append(usage)
+            # Gerçek gözlenen ödül (working_rewards'ta saklanır)
+            odul = self.working_rewards.get((stim, action), 0.0)
+            gruplar[anahtar]["oduller"].append(odul)
+
+        # 2. Kritik deneyimleri (|R| >= kritik_odul) koru — asla ezleme
+        # working_rewards'taki gerçek ödüllere bakılır, ağırlık toplamına değil
+        kritik_stimler = set()
+        for (stim, action), odul in self.working_rewards.items():
+            if abs(float(odul)) >= kritik_odul:
+                kritik_stimler.add((stim, action))
+
+        # 3. Her grup için abstract kural oluştur
+        olusturulan = 0
+        for anahtar_str, veri in gruplar.items():
+            # kalip kendi içinde "|" barındırabilir ("L|*|e:*|..."), bu yüzden
+            # eylemi ayırmak için soldan değil sagdan böl (rsplit).
+            kalip, action = anahtar_str.rsplit("|", 1)
+            n = len(veri["stims"])
+            if n < grup_esik:
+                continue
+            ort_odul = sum(veri["oduller"]) / n
+            if ort_odul < odul_esik:
+                continue
+
+            # Bu grup zaten kritik bir deneyim içeriyorsa, abstract kural
+            # onu ezemesin — bu stim'leri dışla
+            grup_stim_set = set(veri["stims"])
+            if any((s, action) in kritik_stimler for s in grup_stim_set):
+                continue
+
+            # Abstract kural anahtarı: ("GENEL:<kalıp>", action)
+            abstract_key = ("GENEL:" + kalip, action)
+
+            # Ortalama ağırlıkları bu abstract anahtar için yaz
+            feats = self.features(kalip)  # kalıp zaten features gibi ayrılmış
+            if not feats:
+                continue
+            err = ort_odul - self.score(kalip, action)
+            pay = self.lr * err * lr_carpan / max(1, len(feats))
+            for f in feats:
+                key = (f, action)
+                self._yaz(key, pay)
+
+            # Kullanım sayısını da güncelle (kanıt olarak)
+            self.usage[abstract_key] = self.usage.get(abstract_key, 0) + n
+
+            olusturulan += 1
+
+        # 4. Soyutlama kuralı oluşturuldu
+        return olusturulan
+
     def report(self, top=6):
         """Öğrenilmiş en güçlü bağlantılar (gözlem için)."""
         ranked = sorted(self.w.items(), key=lambda kv: -kv[1])[:top]
@@ -992,7 +1209,13 @@ class Brain:
                 "kural": "delta1"}
         tmp.write_text(json.dumps(data, ensure_ascii=False),
                        encoding="utf-8")
-        os.replace(str(tmp), str(path))
+        # Atomically replace original with tmp; if tmp missing, just write directly
+        try:
+            os.replace(str(tmp), str(path))
+        except FileNotFoundError:
+            # tmp kaybolmuşsa (crash ya da temizlik nedeniyle) doğrudan
+            # hedef dosyaya yazarak öğrenme belleğini kaybetmeyelim.
+            path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     def load(self, path):
         """Doğuşta beyni hatırla; bozuk/eksik dosya doğuşu iptal etmez."""
@@ -1053,6 +1276,14 @@ class Brain:
                 self.saglik_egitim.append((dict(d), float(p), str(s)))
             except (TypeError, ValueError):
                 continue          # bozuk kayıt atlanır
+        # DOĞUŞTAN REFLEKS GARANTİSI: kaydedilen beyin dosyasında
+        # instincts bağlantıları eksikse (ör. agresif budama, dosya bozukluğu)
+        # doğuşta kaybolur ve organizma ye/rest gibi hayatta kalma
+        # davranışlarını unutur. Burada eksik olanları geri yükleyiz.
+        for k, v in self.INSTINCTS.items():
+            if k not in self.w:
+                self.w[k] = float(v)
+
         # Eski (tavansız) kayıtlardan gelen şişik tablo sınırsız kalmasın.
         # Yeni yazılan beyinler zaten ≤ USAGE_TAVAN girdi içerdiğinden
         # save→load→load sabit nokta korunur (birebir round-trip bozulmaz).
@@ -1064,6 +1295,39 @@ class Brain:
         self._usage_dondur()
         self._usage_tavanla()
         return len(links)
+
+    def bagirlik_dagilimi(self) -> dict:
+        """Ağırlık dağılımı özeti (özürüm/izleme için).
+
+        Dönüş:
+          - toplam: bağlantı sayısı
+          - ortalama, medyan, min, max: ağırlık istatistikleri
+          - pozitif/negatif/sıfır: işaret dağılımı
+          - kullanimsiz: usage == 0 olan bağlantı sayısı
+          - az_kullanim: 0 < usage < PRUNE_USAGE_MIN olan bağlantı sayısı
+        """
+        import statistics
+        if not self.w:
+            return {"toplam": 0}
+        agirliklar = list(self.w.values())
+        kullanimsiz = sum(1 for k in self.w if self.usage.get(k, 0) == 0)
+        az_kullanim = sum(
+            1 for k in self.w
+            if 0 < self.usage.get(k, 0) < self.PRUNE_USAGE_MIN
+        )
+        return {
+            "toplam": len(agirliklar),
+            "ortalama": round(statistics.mean(agirliklar), 4),
+            "medyan": round(statistics.median(agirliklar), 4),
+            "min": round(min(agirliklar), 4),
+            "max": round(max(agirliklar), 4),
+            "pozitif": sum(1 for w in agirliklar if w > 0),
+            "negatif": sum(1 for w in agirliklar if w < 0),
+            "sifir": sum(1 for w in agirliklar if w == 0),
+            "kullanimsiz": kullanimsiz,
+            "az_kullanim": az_kullanim,
+        }
+
 SINIFLAR = ("Ölüm Tehlikesi", "Normal", "Mükemmel")
 
 class OzHedef:
@@ -1090,10 +1354,11 @@ class OzHedef:
         pain = 0.0
         try:
             _p = getattr(drives, "pain", 0.0)
-            if callable(_p): _p = _p()
+            if callable(_p):
+                _p = _p()
             pain = max(0.0, min(1.0, float(_p)))
         except (TypeError, ValueError):
-            pass
+            pain = 0.0
 
         in_danger = bool(getattr(drives, "in_danger", False))
 

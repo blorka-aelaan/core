@@ -58,6 +58,10 @@ class Door:
             "auth_rejected": 0,
         }
         self._msg_times = defaultdict(deque)   # ip -> zaman damgaları
+        # ---------- Yeni: P2P / gossip (Asama 5) ----------
+        self.komsular = set()        # bilinen (ip, port) ciftleri
+        self.gossip_son = 0.0        # son gossip zamani
+        self.gossip_aralik = 30.0    # saniye: kac sn’de bir gossip atar
 
     # --------------------------------------------------------------- başlat
     def start(self):
@@ -219,6 +223,11 @@ class Door:
             self.journal.log("door_ac")
             self._send_line(conn, json.dumps({"type": "ok", "ack": "ac"}))
             return
+        if mtype == "gossip":
+            # Diğer organizmadan gelen gossip: komşu kaydı + durum paylaşımı.
+            ack = self.gossip_isle(payload)
+            self._send_line(conn, json.dumps(ack))
+            return
         if mtype == "kesif":
             # Dağıtık keşif: başka bir organizma "sen kim sin?" diye sorar.
             # Yanıt: kimlik + sistem jetonu + çalışma süresi.
@@ -240,6 +249,20 @@ class Door:
                              gelen=str(payload)[:100] if payload else "")
             self._send_line(conn, json.dumps({
                 "type": "kesif_yanit", "payload": _bilgi}))
+            return
+
+        if mtype == "feedback":
+            # Kullanıcı/kapıdan gelen dışsal geri bildirim: "iyi" veya "kotu".
+            fb = str(payload).strip().lower()
+            if fb in ("iyi", "kotu"):
+                self.queue.put("feedback:" + fb)
+                self.journal.log("door_feedback", deger=fb)
+                self._send_line(conn, json.dumps({
+                    "type": "ok", "ack": "feedback", "deger": fb}))
+            else:
+                self._send_line(conn, json.dumps({
+                    "type": "error", "error": "invalid_feedback",
+                    "expected": ["iyi", "kotu"]}))
             return
 
         # Varsayılan: kuyruğa at ve organizma duyur
@@ -281,6 +304,64 @@ class Door:
                 self._sock.close()
             except OSError:
                 pass
+
+    # ---------- Yeni: P2P / gossip (Aşama 5) ----------
+
+    def gossip_ekle(self, ip, port=None):
+        """Bilinen komşu organizma ekle (ip, port)."""
+        port = port or self.port
+        self.komsular.add((ip, port))
+        self.journal.log("gossip_ekle", ip=ip, port=port,
+                         toplam=len(self.komsular))
+
+    def gossip_gonder(self, durum):
+        """Tüm bilinen komşulara durum gossipi gönder (ateş ve unut).
+
+        durum: JSON-serilebilir sözlük (ör. beyin özeti, katalog sayıları,
+        mood, enerji). Her komşuya ayrı TCP bağlantı açılır.
+        """
+        import json as _j
+        mesaj = _j.dumps({"type": "gossip", "payload": durum,
+                          "ts": time.time()})
+        for ip, port in list(self.komsular):
+            try:
+                s = socket.create_connection((ip, port), timeout=3.0)
+                # Token yoksa kimlik doğrulaması gerekmez (gossip salt-okunur)
+                s.sendall((mesaj + "\n").encode("utf-8"))
+                # Kıskanıp yanıtı oku (maks 2 sn)
+                try:
+                    s.settimeout(2.0)
+                    _ = s.recv(4096)
+                except socket.timeout:
+                    pass
+                s.close()
+                with self._lock:
+                    self._stats["bytes_out"] += len(mesaj.encode("utf-8"))
+            except OSError:
+                # Komşu erişilemez: listeden çıkar (geçici)
+                self.komsular.discard((ip, port))
+                self.journal.log("gossip_komsu_erisilemez", ip=ip, port=port)
+
+    def gossip_zaman_dusti(self, simdi=None):
+        """Eğer gossip aralığı doluysa True döner (main döngüden çağrılır)."""
+        simdi = simdi or time.time()
+        if simdi - self.gossip_son >= self.gossip_aralik:
+            self.gossip_son = simdi
+            return True
+        return False
+
+    # ----- gossip mesajını işle (Door._dispatch'dan çağrılır) -----
+    def gossip_isle(self, payload):
+        """Gelen gossip'i işle: komşuyu kaydet, durumu kuyruğa aktar."""
+        ip = payload.get("ip")
+        port = payload.get("port", self.port)
+        durum = payload.get("durum", {})
+        ts = payload.get("ts", 0)
+        if ip:
+            self.gossip_ekle(ip, port)
+            self.journal.log("gossip_alinan", ip=ip, ts=ts,
+                             durum_keyler=list(durum.keys())[:5])
+        return {"type": "gossip_ack", "ts": time.time()}
 
 
 # ---------- komut satırı (eskiye uyumlu) ----------
@@ -402,6 +483,10 @@ if __name__ == "__main__":
     elif len(sys.argv) > 1 and sys.argv[1] == "ac":
         # sınav: "bir kutu aç"
         print(send("127.0.0.1", 5777, "ac"))
+    elif len(sys.argv) > 1 and sys.argv[1] == "feedback":
+        # Dışsal geri bildirim: "iyi" veya "kotu"
+        fb = sys.argv[2] if len(sys.argv) > 2 else "iyi"
+        print(send("127.0.0.1", 5777, "feedback:" + fb))
     elif len(sys.argv) > 1 and sys.argv[1] == "watch":
         try:
             watch("journal.jsonl")
@@ -430,4 +515,5 @@ if __name__ == "__main__":
             print("Başka organizma bulunamadı.")
     else:
         print('kullanım: python3 door.py send [--token T] "mesaj" | '
-              'shock N | gorev ... | ac | kesif [ag/cidr] | watch')
+              'shock N | gorev ... | ac | feedback [iyi|kotu] | '
+              'kesif [ag/cidr] | watch')

@@ -1,0 +1,1132 @@
+"""
+asm_ogren.py — x86-64 Assembly öğrenme organı (profesyonel sürüm)
+
+CORE organizmasının ``uzuv`` (Assembly) organı için otomatik program-öğrenme
+döngüsü. Sadece Python standard kitaplığı (stdlib) kullanılır.
+
+Mimari
+------
+- ``Emulator``:      Bellek/rakım/yığın desteği olan hızlı x86-64 emülatörü.
+- ``TaskGenerator``: Müfredat (curriculum) tabanlı görev üretir; emülatörle
+                     üretir, ``AsmUzuv`` ile gerçek makinede doğrular.
+- ``BeamSearchSolver``: Aile ağırlıklarıyla kışmalı arama (beam search) ile
+                        çözüm üretir.
+- ``WeightTable``:   Bağlamsal op-aile ağırlıkları (isabet / deneme).
+- ``LearningState``: Öğrenme durumu (seviye, geçmiş, ağırlıklar) diske
+                     kalıcılaşır (atomik yazma).
+- ``AssemblyLearner``: Zaman sınırlı öğrenme döngüsünü koordine eder.
+- CLI:               ``--dakika``, ``--kiyas``, ``--rapor``, ``--seed``,
+                     ``--kok`` seçenekleri.
+
+Kullanım (``uzuv/`` dizininde)::
+
+    python3 asm_ogren.py --dakika 5      # öğren
+    python3 asm_ogren.py --kiyas 40      # öğrenilmiş ağırlık vs düz arama
+    python3 asm_ogren.py --rapor         # rapor yazdır
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import random
+import re
+import sys
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+
+logger = logging.getLogger("asm_ogren")
+
+# Paket olarak içe aktarıldığında (örn. ``from uzuv.asm_ogren import ...``) göreli
+# import kullanılır; doğrudan ``python3 asm_ogren.py`` çalıştırıldığında ise
+# aynı dizindeki ``asm_uzuv`` modülü bulunur.
+try:
+    from .asm_uzuv import AsmUzuv  # type: ignore[no-redef]
+except ImportError:  # pragma: no cover - doğrudan betik olarak çalıştırıldığında
+    from asm_uzuv import AsmUzuv  # type: ignore[no-redef,import-not-found]
+
+
+# --------------------------------------------------------------------------- Sabitler
+
+MASK: int = (1 << 64) - 1
+"""64 bitlik maske: x86-64 register sıfırlama sınırı."""
+
+REGISTERS: Tuple[str, ...] = (
+    "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
+    "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+)
+"""Tam x86-64 genel amaçlı yazmaç kümesi (System V AMD64 ABI)."""
+
+IMMEDIATES: Tuple[int, ...] = (1, 2, 3, 5, 10)
+INPUT_POOL: Tuple[int, ...] = (0, 1, 2, 3, 5, 7, 10, -3, 100, 255)
+STACK_SIZE: int = 256
+MAX_STEPS: int = 1000
+BEAM_WIDTH: int = 128
+CURRICULUM_MAX_LEVEL: int = 4
+
+# System V AMD64 çağrı kuralı: ilk 6 tamsayı argümanı.
+ARG_REGISTER: Tuple[str, ...] = ("rdi", "rsi", "rdx", "rcx", "r8", "r9")
+
+MEMORY_ADDRESS_PATTERNS: Tuple[str, ...] = (
+    "[rax]", "[rbx]", "[rcx]", "[rdx]", "[rsi]", "[rdi]", "[r8]", "[r9]",
+    "[rip + veri]", "[rip + veri + 8]",
+)
+
+BINARY_OPS: Dict[str, Callable[[int, int], int]] = {
+    "add": lambda a, b: (a + b) & MASK,
+    "sub": lambda a, b: (a - b) & MASK,
+    "imul": lambda a, b: (a * b) & MASK,
+    "and": lambda a, b: a & b,
+    "or": lambda a, b: a | b,
+    "xor": lambda a, b: a ^ b,
+}
+
+UNARY_OPS: Dict[str, Callable[[int], int]] = {
+    "inc": lambda a: (a + 1) & MASK,
+    "dec": lambda a: (a - 1) & MASK,
+    "neg": lambda a: (-a) & MASK,
+    "not": lambda a: (~a) & MASK,
+}
+
+OP = Tuple[str, str, Callable[[Dict[str, Any]], None]]
+"""``(aile_ön_ek, kod_satırı, durum_mutasyon_fonksiyonu)`` üçlüsü."""
+
+__all__ = [
+    "MASK", "REGISTERS", "INPUT_POOL", "BEAM_WIDTH", "CURRICULUM_MAX_LEVEL",
+    "OP", "CurriculumLevel", "Task", "SolveResult", "WeightTable",
+    "LearningState", "Emulator", "TaskGenerator", "BeamSearchSolver",
+    "AssemblyLearner", "build_ops", "ops_for_level", "context_key",
+    "main",
+]
+
+# --------------------------------------------------------------------------- Yardımcılar
+
+_REGISTER_RE = re.compile(
+    r"\b(rax|rbx|rcx|rdx|rsi|rdi|rbp|rsp|r8|r9|r10|r11|r12|r13|r14|r15)\b"
+)
+_STACKLESS = [r for r in REGISTERS if r != "rsp"]
+
+
+def _extract_registers(code: str) -> List[str]:
+    """Assembly kod satırından kullanılan yazmaç isimlerini çıkarır."""
+    return _REGISTER_RE.findall(code)
+
+
+def _family_of(code: str) -> Optional[str]:
+    """Kod satırına karşılık gelen op ailesini döndürür."""
+    op = _CODE_TO_OP.get(code)
+    return op[0] if op else None
+
+
+def _non_stack(registers: Sequence[str]) -> List[str]:
+    """Çıktı karşılaştırmasında hariç tutulan yığın işaretçisini çıkarır."""
+    return [r for r in registers if r != "rsp"]
+
+
+# --- Durum mutasyonu yardımcıları (her biri bir Op fonksiyonu üretir) ---
+
+def _mov_reg(dest: str, src: str) -> Callable[[Dict[str, Any]], None]:
+    def fn(state: Dict[str, Any]) -> None:
+        state[dest] = state[src]
+
+    return fn
+
+
+def _mov_imm(dest: str, value: int) -> Callable[[Dict[str, Any]], None]:
+    def fn(state: Dict[str, Any]) -> None:
+        state[dest] = value & MASK
+
+    return fn
+
+
+def _binary_op(dest: str, src: str,
+               op: Callable[[int, int], int]) -> Callable[[Dict[str, Any]], None]:
+    def fn(state: Dict[str, Any]) -> None:
+        state[dest] = op(state[dest], state[src])
+
+    return fn
+
+
+def _binary_imm(dest: str, value: int,
+                op: Callable[[int, int], int]) -> Callable[[Dict[str, Any]], None]:
+    def fn(state: Dict[str, Any]) -> None:
+        state[dest] = op(state[dest], value)
+
+    return fn
+
+
+def _lea(dest: str, src: str, scale: int) -> Callable[[Dict[str, Any]], None]:
+    def fn(state: Dict[str, Any]) -> None:
+        state[dest] = (state[src] * (1 + scale)) & MASK
+
+    return fn
+
+
+def _shift_imm(dest: str, value: int, left: bool) -> Callable[[Dict[str, Any]], None]:
+    def fn(state: Dict[str, Any]) -> None:
+        if left:
+            state[dest] = (state[dest] << value) & MASK
+        else:
+            state[dest] = state[dest] >> value
+
+    return fn
+
+
+def _unary(dest: str, op: Callable[[int], int]) -> Callable[[Dict[str, Any]], None]:
+    def fn(state: Dict[str, Any]) -> None:
+        state[dest] = op(state[dest]) & MASK
+
+    return fn
+
+
+def _mem_write_imm(ra: str, value: int) -> Callable[[Dict[str, Any]], None]:
+    def fn(state: Dict[str, Any]) -> None:
+        state["bellek"][state[ra] & 255] = value
+
+    return fn
+
+
+def _mem_read_reg(ra: str, rb: str) -> Callable[[Dict[str, Any]], None]:
+    def fn(state: Dict[str, Any]) -> None:
+        state[ra] = state["bellek"][state[rb] & 255]
+
+    return fn
+
+
+def _mem_write_reg(ra: str, rb: str) -> Callable[[Dict[str, Any]], None]:
+    def fn(state: Dict[str, Any]) -> None:
+        state["bellek"][state[ra] & 255] = state[rb]
+
+    return fn
+
+
+# --------------------------------------------------------------------------- Op tablosu
+
+def build_ops() -> List[OP]:
+    """Tüm desteklenen (aile, kod, fonksiyon) op üçlüsünü döndürür."""
+    ops: List[OP] = []
+
+    def add(prefix: str, code: str,
+            fn: Callable[[Dict[str, Any]], None]) -> None:
+        ops.append((prefix, code, fn))
+
+    # --- Register ⇄ Register / Register ⇄ Immidiate ---
+    for dest in REGISTERS:
+        for src in REGISTERS:
+            if dest != src:
+                add("mov:rr", f"mov {dest}, {src}", _mov_reg(dest, src))
+            for mnemonic, op in BINARY_OPS.items():
+                add(f"{mnemonic}:rr", f"{mnemonic} {dest}, {src}",
+                    _binary_op(dest, src, op))
+            for scale in (1, 2, 4, 8):
+                add("lea:r", f"lea {dest}, [{src} + {src}*{scale}]",
+                    _lea(dest, src, scale))
+        for value in IMMEDIATES:
+            add("mov:ri", f"mov {dest}, {value}", _mov_imm(dest, value))
+            for mnemonic, op in BINARY_OPS.items():
+                add(f"{mnemonic}:ri", f"{mnemonic} {dest}, {value}",
+                    _binary_imm(dest, value, op))
+        for value in (1, 2, 3):
+            add("shl:ri", f"shl {dest}, {value}", _shift_imm(dest, value, True))
+            add("shr:ri", f"shr {dest}, {value}", _shift_imm(dest, value, False))
+        for mnemonic, op in UNARY_OPS.items():
+            add(f"{mnemonic}:r", f"{mnemonic} {dest}", _unary(dest, op))
+
+    # --- Bellek erişimi (256 baytlık basit bellek; [rax] = bellek[rax & 255]) ---
+    for ra in REGISTERS:
+        add("mov:[ra]-imm5", f"mov [{ra}], 5", _mem_write_imm(ra, 5))
+        add("mov:[ra]-imm10", f"mov [{ra}], 10", _mem_write_imm(ra, 10))
+        for rb in REGISTERS:
+            add("mov:ra-[rb]", f"mov {ra}, [{rb}]", _mem_read_reg(ra, rb))
+            add("mov:[ra]-rb", f"mov [{ra}], {rb}", _mem_write_reg(ra, rb))
+
+    # --- Bayrak işlemleri (yazmacı değiştirmez, sadece ZF/CF/OF) ---
+    def _cmp(state: Dict[str, Any], ra: str, rb: str) -> None:
+        fark = (state[ra] - state[rb]) & MASK
+        state["ZF"] = 1 if fark == 0 else 0
+        state["CF"] = 1 if state[ra] < state[rb] else 0
+        state["OF"] = 1 if (((state[ra] ^ state[rb]) & (1 << 63))
+                            and ((state[ra] ^ fark) & (1 << 63))) else 0
+
+    def _test(state: Dict[str, Any], ra: str, rb: str) -> None:
+        sonuc = state[ra] & state[rb]
+        state["ZF"] = 1 if sonuc == 0 else 0
+        state["CF"] = 0
+        state["OF"] = 0
+
+    for ra in REGISTERS:
+        for rb in REGISTERS:
+            add("cmp:rr", f"cmp {ra}, {rb}",
+                lambda state, ra=ra, rb=rb: _cmp(state, ra, rb))
+            add("test:rr", f"test {ra}, {rb}",
+                lambda state, ra=ra, rb=rb: _test(state, ra, rb))
+
+    # --- Etiket ve atlama (pc tabanlı akış kontrolü) ---
+    LABELS = ("dongu", "son", "baslangic", "kontrol", "cikis")
+    for etiket in LABELS:
+        add(f"label:{etiket}", f"{etiket}:",
+            lambda state, etiket=etiket: None)
+
+    for etiket in LABELS:
+        add("jmp", f"jmp {etiket}",
+            lambda state, etiket=etiket: state.__setitem__(
+                "pc", state["_label_pos"].get(etiket, state["pc"] + 1)))
+        add("jz", f"jz {etiket}",
+            lambda state, etiket=etiket: state.__setitem__(
+                "pc", state["_label_pos"].get(etiket, state["pc"] + 1))
+            if state["ZF"] == 1 else None)
+        add("jnz", f"jnz {etiket}",
+            lambda state, etiket=etiket: state.__setitem__(
+                "pc", state["_label_pos"].get(etiket, state["pc"] + 1))
+            if state["ZF"] == 0 else None)
+
+    # --- Yığın işlemleri (push, pop, call, ret) ---
+    for ra in REGISTERS:
+        add(f"push:{ra}", f"push {ra}",
+            lambda state, ra=ra: (
+                state["yigin"].append(state[ra]),
+                state.__setitem__("rsp", (state["rsp"] - 8) & MASK)))
+        add(f"pop:{ra}", f"pop {ra}",
+            lambda state, ra=ra: (
+                state.__setitem__(ra, state["yigin"].pop()),
+                state.__setitem__("rsp", (state["rsp"] + 8) & MASK))
+            if state["yigin"] else None)
+
+    for etiket in LABELS:
+        add(f"call:{etiket}", f"call {etiket}",
+            lambda state, etiket=etiket: (
+                state["yigin"].append(state["pc"] + 1),
+                state.__setitem__("pc", state["_label_pos"].get(etiket, state["pc"] + 1))))
+    add("ret", "ret",
+        lambda state: state.__setitem__("pc", state["yigin"].pop())
+        if state["yigin"] else None)
+
+    # --- Sistem çağrısı (syscall): exit(60), write(1) ---
+    def _syscall(state: Dict[str, Any]) -> None:
+        no = state["rax"]
+        if no == 60:  # exit
+            state["_exit_code"] = state.get("rdi", 0)
+            state["_halt"] = True
+        elif no == 1:  # write
+            fd = state.get("rdi", 0)
+            cnt = state.get("rdx", 0)
+            if fd == 1 and cnt > 0:
+                state["_wrote"] = state.get("_wrote", 0) + cnt
+        else:
+            state["_unsupported_syscall"] = no
+
+    add("syscall", "syscall", _syscall)
+
+    return ops
+
+
+OPS: List[OP] = build_ops()
+AILELER: Dict[str, List[Tuple[str, Callable[[Dict[str, Any]], None]]]] = {}
+_CODE_TO_OP: Dict[str, OP] = {}
+for _prefix, _code, _fn in OPS:
+    AILELER.setdefault(_prefix, []).append((_code, _fn))
+    _CODE_TO_OP[_code] = (_prefix, _code, _fn)
+
+# --------------------------------------------------------------------------- Müfredat (curriculum)
+
+
+@dataclass(frozen=True)
+class CurriculumLevel:
+    """Bir müfredat seviyesinin yapılandırması."""
+
+    level: int
+    """Seviye numarası (1..CURRICULUM_MAX_LEVEL)."""
+
+    name: str
+    """İnsan tarafından okunabilir seviye adı."""
+
+    registers: Tuple[str, ...]
+    """İzin verilen yazmaçlar."""
+
+    op_prefixes: Tuple[str, ...]
+    """Bu seviyede kullanıma açılan op-ön ekleri."""
+
+    memory: bool = False
+    """Bellek erişimine izin verilsin mi."""
+
+    flags: bool = False
+    """Bayrak işlemlerine izin verilsin mi."""
+
+    jumps: bool = False
+    """Atlama/etiketlere izin verilsin mi."""
+
+    stack: bool = False
+    """Yığın işlemlerine izin verilsin mi."""
+
+    syscall: bool = False
+    """Sistem çağrısına izin verilsin mi."""
+
+    max_instructions: int = 5
+    """Programda izin verilen maksimum komut sayısı."""
+
+    def allowed_registers(self) -> Set[str]:
+        return set(self.registers)
+
+
+def _curriculum() -> Dict[int, CurriculumLevel]:
+    return {
+        1: CurriculumLevel(
+            1, "Temel aritmetik", ("rax", "rbx"),
+            ("mov:rr", "mov:ri", "add:rr", "add:ri", "sub:rr", "sub:ri",
+             "xor:rr", "xor:ri", "and:rr", "and:ri", "or:rr", "or:ri",
+             "neg:r", "not:r", "inc:r", "dec:r", "shl:ri", "shr:ri"),
+            max_instructions=5,
+        ),
+        2: CurriculumLevel(
+            2, "4 yazmaç + bellek + bayrak", ("rax", "rbx", "rcx", "rdx"),
+            ("mov:rr", "mov:ri", "mov:ra-[rb]", "mov:[ra]-rb",
+             "add:rr", "add:ri", "sub:rr", "sub:ri",
+             "xor:rr", "xor:ri", "and:rr", "and:ri", "or:rr", "or:ri",
+             "neg:r", "not:r", "inc:r", "dec:r", "shl:ri", "shr:ri",
+             "cmp:rr", "test:rr"),
+            memory=True, flags=True, max_instructions=6,
+        ),
+        3: CurriculumLevel(
+            3, "8 yazmaç + bayrak (bellek yok)",
+            ("rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp"),
+            ("mov:rr", "mov:ri", "add:rr", "add:ri", "sub:rr", "sub:ri",
+             "xor:rr", "xor:ri", "and:rr", "and:ri", "or:rr", "or:ri",
+             "neg:r", "not:r", "inc:r", "dec:r", "shl:ri", "shr:ri",
+             "cmp:rr", "test:rr"),
+            flags=True, max_instructions=10,
+        ),
+        4: CurriculumLevel(
+            4, "Tam x86-64 (16 yazmaç + yığın + syscall + atlamalar)", REGISTERS,
+            ("mov:rr", "mov:ri", "mov:ra-[rb]", "mov:[ra]-rb",
+             "mov:[ra]-imm5", "mov:[ra]-imm10",
+             "add:rr", "add:ri", "sub:rr", "sub:ri", "imul:rr", "imul:ri",
+             "xor:rr", "xor:ri", "and:rr", "and:ri", "or:rr", "or:ri",
+             "neg:r", "not:r", "inc:r", "dec:r", "shl:ri", "shr:ri", "lea:r",
+             "cmp:rr", "test:rr",
+             "push:", "pop:", "call:", "ret",
+             "jmp", "jz", "jnz", "label:",
+             "syscall"),
+            memory=True, flags=True, jumps=True, stack=True, syscall=True,
+            max_instructions=10,
+        ),
+    }
+
+
+CURRICULUM: Dict[int, CurriculumLevel] = _curriculum()
+
+
+def ops_for_level(level: int, all_ops: Sequence[OP],
+                  curriculum: Dict[int, CurriculumLevel]) -> List[OP]:
+    """Belirli seviyeye uygun op'ları filtreler (yazmaç isimleri de kontrol edilir)."""
+    cfg = curriculum[level]
+    prefixes = cfg.op_prefixes
+    allowed = set(cfg.registers)
+    result: List[OP] = []
+    for prefix, code, fn in all_ops:
+        eslesiyor = any(prefix.startswith(oek) or code.startswith(oek)
+                        for oek in prefixes)
+        if not eslesiyor:
+            continue
+        kod_yazmaclari = set(_extract_registers(code))
+        if kod_yazmaclari and not kod_yazmaclari.issubset(allowed):
+            continue
+        result.append((prefix, code, fn))
+    return result
+
+
+@dataclass
+class Task:
+    """Öğrenme görevi: gizli programın (girdi → çıktı) eşlemesi."""
+
+    level: int
+    length: int
+    program: List[OP]
+    code: str
+    training: List[Dict[str, Any]]
+    secret: List[Dict[str, Any]]
+
+
+@dataclass
+class SolveResult:
+    """Bir görevin çözüm sonucu."""
+
+    solved: bool
+    program: Optional[List[str]]
+    attempts: int
+    emulator_mismatch: int
+    attempts_detail: Dict[str, int]
+
+
+# --------------------------------------------------------------------------- Bağlam anahtarı
+
+
+def context_key(training: Sequence[Dict[str, Any]]) -> str:
+    """Eğitim örneklerinden 10 bitlik bağlam kalığı üretir.
+
+    Her bit, girdi/çıktı çiftlerindeki bir özelliği kodlar; aynı bağlam
+    aynı op-aile ağırlıklarını paylaşır.
+    """
+    a = [o["rax"] & MASK for o in training]
+    b = [o["rbx"] & MASK for o in training]
+    ca = [o["cikti"]["rax"] for o in training]
+    cb = [o["cikti"]["rbx"] for o in training]
+
+    features: List[bool] = [
+        len({(ci - ai) & MASK for ai, ci in zip(a, ca)}) == 1,                  # 0: rax farkı sabit
+        any(all(ci == (ai * k) & MASK for ai, ci in zip(a, ca))
+            for k in range(2, 17)),                                             # 1: rax oranı sabit
+        all(ci <= ai for ai, ci in zip(a, ca)),                                 # 2: rax çıkışı <= rax
+        (all(ci == bi for bi, ci in zip(b, cb))                                 # 3: rbx çıkışı == rbx
+         or len({(ci - bi) & MASK for bi, ci in zip(b, cb)}) == 1
+         or any(all(ci == op(ai, bi) & MASK for ai, bi, ci in zip(a, b, ca))
+                for op in BINARY_OPS.values())),
+        all(ci & ~ai & MASK == 0 for ai, ci in zip(a, ca)),                    # 4: rax çıkışı bit alt kümesi
+        len({ca[i] for i in range(len(ca))}) == 1,                              # 5: rax çıkışı sabit
+        any((ai & 1) != (ci & 1) for ai, ci in zip(a, ca)),                     # 6: rax tek/çift değişimi
+        any(ci == 0 for ci in ca),                                              # 7: rax çıkışı sıfır
+        any(ai == bi for ai, bi in zip(a, b)),                                  # 8: rax == rbx girdisi var
+        any((ci - ai) & MASK == 1 for ai, ci in zip(a, ca)),                    # 9: rax +1 ilişkisi
+    ]
+    return "".join("1" if x else "0" for x in features)
+
+# --------------------------------------------------------------------------- Ağırlık tablosu
+
+
+@dataclass
+class WeightTable:
+    """Bağlamsal op-aile ağırlıkları: {baglam: {aile: [isabet, deneme]}}.
+
+    Ağırlık = (isabet + 1) / (deneme + 10). Görülmemiş bağlamda hepsi eşittir.
+    """
+
+    records: Dict[str, Dict[str, List[int]]] = field(default_factory=dict)
+
+    def weights(self, ctx: str, families: Sequence[str]) -> Dict[str, float]:
+        """Her aile için normalized ağırlık döndürür."""
+        row = self.records.get(ctx, {})
+        return {
+            a: (row.get(a, [0, 0])[0] + 1) / (row.get(a, [0, 0])[1] + 10)
+            for a in families
+        }
+
+    def record_attempts(self, ctx: str, attempts: Dict[str, int],
+                        solved_families: Sequence[str]) -> None:
+        """Deneme sayılarını ve başarımları kaydeder."""
+        row = self.records.setdefault(ctx, {})
+        for aile, sayi in attempts.items():
+            row.setdefault(aile, [0, 0])[1] += sayi
+        for aile in solved_families:
+            row.setdefault(aile, [0, 0])[0] += 1
+
+
+# --------------------------------------------------------------------------- Kalıcı durum
+
+
+@dataclass
+class LearningState:
+    """Kalıcı öğrenme durumu (asm_ogren.json)."""
+
+    path: Path
+    weights: WeightTable = field(default_factory=WeightTable)
+    history: List[Dict[str, Any]] = field(default_factory=list)
+    max_length: int = 1
+    max_level: int = 1
+    total_tasks: int = 0
+    failures: Dict[str, Set[Tuple[str, ...]]] = field(default_factory=dict)
+    primitives: Dict[str, List[str]] = field(default_factory=dict)
+
+    def load(self) -> None:
+        """Disktan durumu yükler; dosya yoksa/bozuksa sessizce geri dönülür."""
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        self.max_length = data.get("max_length", 1)
+        self.max_level = data.get("max_level", 1)
+        self.total_tasks = data.get("total_tasks", 0)
+        raw_failures = data.get("failures", {})
+        self.failures = {
+            k: {tuple(x) for x in v} for k, v in raw_failures.items()
+        }
+        self.primitives = data.get("primitives", {})
+        self.weights.records = data.get("bagil", {})
+        self.history = data.get("gecmis", [])
+
+    def save(self, keep_history: int = 300) -> None:
+        """Durumu atomik olarak diske yazar (geçmişi son ``keep_history``'ye kırpır)."""
+        payload = {
+            "bagil": self.weights.records,
+            "gecmis": self.history[-keep_history:],
+            "max_length": self.max_length,
+            "max_level": self.max_level,
+            "total_tasks": self.total_tasks,
+            "failures": {k: [list(x) for x in v] for k, v in self.failures.items()},
+            "primitives": self.primitives,
+        }
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
+                       encoding="utf-8")
+        os.replace(tmp, self.path)
+
+
+# --------------------------------------------------------------------------- Emülatör
+
+
+class Emulator:
+    """Hızlı, bellek/bayrak/yığın desteği olan x86-64 emülatörü.
+
+    Durum sözlüğü: yazmaçlar + ZF/CF/OF + pc + bellek + yigin + rsp +
+    _label_pos + _halt.
+    """
+
+    def __init__(self, registers: Sequence[str] = REGISTERS) -> None:
+        self.registers = tuple(registers)
+
+    def label_positions(self, program: Sequence[OP]) -> Dict[str, int]:
+        """Programdaki ``label:<isim>`` işlemlerinin konum haritası."""
+        positions: Dict[str, int] = {}
+        for index, (prefix, _code, _fn) in enumerate(program):
+            if prefix.startswith("label:"):
+                positions[prefix[len("label:"):]] = index
+        return positions
+
+    def fresh_state(self, initial: Dict[str, int],
+                    label_positions: Dict[str, int]) -> Dict[str, Any]:
+        state: Dict[str, Any] = {r: initial.get(r, 0) & MASK for r in self.registers}
+        state.update({
+            "ZF": 0, "CF": 0, "OF": 0,
+            "pc": 0, "_halt": False,
+            "bellek": [0] * STACK_SIZE,
+            "yigin": [],
+            "rsp": 0x7FFF,
+            "_label_pos": label_positions,
+        })
+        return state
+
+    def run(self, program: Sequence[OP], initial: Dict[str, int],
+            max_steps: int = MAX_STEPS) -> Optional[Dict[str, int]]:
+        """Tek bir programı çalıştırır ve register değerlerini döndürür.
+
+        Sonsuz döngü tespit edilirse ``None`` döner. ``rsp`` çıktıdan
+        hariç tutulur (yığın işaretçisi iç durum tutulur).
+        """
+        labels = self.label_positions(program)
+        state = self.fresh_state(initial, labels)
+        steps = 0
+        while (0 <= state["pc"] < len(program)
+               and steps < max_steps
+               and not state.get("_halt", False)):
+            prev_pc = state["pc"]
+            _, _, fn = program[state["pc"]]
+            fn(state)
+            if state["pc"] == prev_pc:
+                state["pc"] += 1  # normal akış: bir sonraki komuta geç
+            steps += 1
+        if steps >= max_steps:
+            return None  # sonsuz döngü
+        return {r: state[r] & MASK for r in self.registers if r != "rsp"}
+
+    def matches(self, program: Sequence[OP], examples: Sequence[Dict[str, Any]],
+                registers: Sequence[str]) -> bool:
+        """Programın tüm örnekler için doğru çıkış üretip üretmediğini döndürür."""
+        out_regs = _non_stack(registers)
+        for example in examples:
+            initial = {r: example[r] for r in registers}
+            result = self.run(program, initial)
+            if result is None:
+                return False
+            expected = {r: example["cikti"][r] for r in out_regs}
+            if any(result[r] != expected[r] for r in expected):
+                return False
+        return True
+
+    def score(self, program: Sequence[OP], examples: Sequence[Dict[str, Any]],
+              registers: Sequence[str]) -> int:
+        """Doğru çıkış üreten örnek sayısını döndürür (daha yüksek = daha iyi)."""
+        out_regs = _non_stack(registers)
+        points = 0
+        for example in examples:
+            initial = {r: example[r] for r in registers}
+            result = self.run(program, initial)
+            if result is None:
+                continue
+            expected = {r: example["cikti"][r] for r in out_regs}
+            if all(result[r] == expected[r] for r in expected):
+                points += 1
+        return points
+
+
+# --------------------------------------------------------------------------- Görev üretimi
+
+
+class TaskGenerator:
+    """Müfredat bazlı görev üretir; emülatörle üretir, AsmUzuv ile doğrular."""
+
+    def __init__(self, emulator: Emulator, ops: Sequence[OP],
+                 curriculum: Dict[int, CurriculumLevel]) -> None:
+        self.emulator = emulator
+        self.ops = ops
+        self.curriculum = curriculum
+
+    def _selected_ops(self, level: int) -> List[OP]:
+        return ops_for_level(level, self.ops, self.curriculum)
+
+    def _reducible(self, examples: Sequence[Dict[str, Any]], length: int,
+                   registers: Sequence[str],
+                   selected_ops: Optional[Sequence[OP]] = None) -> bool:
+        """Tek komutluk bir program aynı davranışı veriyorsa görev o kadar uzun değil."""
+        if length <= 1:
+            return False
+        ops_list = selected_ops if selected_ops is not None else self.ops
+        for prefix, code, fn in ops_list:
+            if self.emulator.matches([(prefix, code, fn)], examples, registers):
+                return True
+        return False
+
+    def generate(self, asm: AsmUzuv, rng: random.Random, level: int,
+                 length: int, max_attempts: int = 100,
+                 deadline: Optional[float] = None) -> Optional[Task]:
+        """Seviye bazlı görev üretir. Hibrit: emülatörle üretir, gerçek makineyle doğrular."""
+        cfg = self.curriculum[level]
+        registers = cfg.registers
+        selected_ops = self._selected_ops(level)
+        if not selected_ops:
+            return None
+        max_instructions = cfg.max_instructions
+        n = min(length, max_instructions)
+        if n < 1:
+            n = 1
+
+        for _ in range(max_attempts):
+            if deadline is not None and time.monotonic() >= deadline:
+                return None
+            secret = [rng.choice(selected_ops)[1] for _ in range(n)]
+            code = "\n".join(secret)
+            code_to_fn: Dict[str, OP] = {}
+            for prefix, k, f in selected_ops:
+                if k not in code_to_fn:
+                    code_to_fn[k] = (prefix, k, f)
+            ordered_program = [code_to_fn[k] for k in secret]
+
+            inputs = [{ad: rng.choice(INPUT_POOL) for ad in registers}
+                      for _ in range(6)]
+            examples: List[Dict[str, Any]] = []
+            emulator_ok = True
+            for given in inputs:
+                output = self.emulator.run(ordered_program, given)
+                if output is None:
+                    emulator_ok = False
+                    break
+                examples.append({**given, "cikti": output})
+            if not emulator_ok:
+                continue
+
+            outputs = {tuple(o["cikti"][ad] for ad in registers if ad != "rsp")
+                       for o in examples}
+            if len(outputs) <= 1:
+                continue  # çıkış sabit, görev ilgisiz
+
+            # Tek-komutluk indirgenebilirlik kontrolü.
+            if self._reducible(examples, n, registers, selected_ops):
+                continue
+
+            return Task(
+                level=level, length=n, program=ordered_program, code=code,
+                training=examples[:4], secret=examples[4:],
+            )
+        return None
+
+# --------------------------------------------------------------------------- Çözücü (beam search)
+
+
+class BeamSearchSolver:
+    """Aile ağırlıklarıyla kışmalı arama (beam search) ile çözüm üretir."""
+
+    def __init__(self, emulator: Emulator, ops: Sequence[OP],
+                 curriculum: Dict[int, CurriculumLevel]) -> None:
+        self.emulator = emulator
+        self.ops = ops
+        self.curriculum = curriculum
+
+    def _selected_ops(self, level: int) -> List[OP]:
+        return ops_for_level(level, self.ops, self.curriculum)
+
+    def _verify_real_all(self, asm: AsmUzuv, code: str,
+                         examples: Sequence[Dict[str, Any]],
+                         registers: Sequence[str],
+                         cache: Dict[Tuple[str, Tuple[Tuple[str, int], ...]], bool], deadline: Optional[float] = None) -> bool:
+        """Tüm örnekler için gerçek makineyle doğrulama (önbellekli)."""
+        out_regs = _non_stack(registers)
+        for example in examples:
+            initial = {r: example[r] for r in registers}
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            expected = {r: example["cikti"][r] for r in out_regs}
+            key = (code, tuple(sorted(initial.items())))
+            if key in cache:
+                if not cache[key]:
+                    return False
+                continue
+            ok = asm.tahmin_dene(code, expected, initial)["dogru"]
+            cache[key] = ok
+            if not ok:
+                return False
+        return True
+
+    def solve(self, asm: AsmUzuv, task: Task, weights: Any,
+              rng: random.Random, level: int,
+              state: Optional[LearningState],
+              record_to_brain: bool = True,
+              budget: int = 60000,
+              deadline: Optional[float] = None) -> SolveResult:
+        """Görevi çözmeye çalışır.
+
+        ``state`` verildiğinde başarısız önbellek ve primitik kütüphanesi
+        kullanılır; ``record_to_brain`` False ise çözüm beyine yazılmaz.
+        """
+        budget = max(1, int(budget))
+        explored = [0]
+
+        def exhausted() -> bool:
+            return explored[0] >= budget or (deadline is not None and time.monotonic() >= deadline)
+        egitim, sakli = task.training, task.secret
+        registers = self.curriculum[level].registers
+        attempts = emulator_mismatch = 0
+        attempts_detail: Dict[str, int] = {}
+        ctx = context_key(egitim)
+        selected_ops = self._selected_ops(level)
+
+        def _w(aile: str) -> float:
+            if hasattr(weights, "weights"):
+                return float(weights.weights(ctx, [aile]).get(aile, 0.1))
+            return float(weights.get(aile, 1.0))
+
+        ordered = sorted(selected_ops, key=lambda op: (-_w(op[0]), rng.random()))
+        seen: Set[Tuple[str, ...]] = set()
+        failure_cache = state.failures.get(ctx, set()) if state is not None else set()
+
+        # --- 1. Daha önce bu bağlamda çözülen tek-komutluk primitikleri dene ---
+        if state is not None and ctx in state.primitives:
+            for kod_str in state.primitives[ctx]:
+                attempts += 1
+                aile = _family_of(kod_str)
+                if aile is not None:
+                    attempts_detail[aile] = attempts_detail.get(aile, 0) + 1
+                for prefix, code, fn in selected_ops:
+                    if code != kod_str:
+                        continue
+                    if self.emulator.matches([(prefix, code, fn)], egitim, registers):
+                        if (self._verify_real_all(asm, kod_str, egitim, registers, {}, deadline)
+                                and self._verify_real_all(asm, kod_str, sakli, registers, {}, deadline)):
+                            if asm is not None and record_to_brain:
+                                asm.program_kaydet(kod_str, ctx, deneme=attempts)
+                            return SolveResult(True, [kod_str], attempts, 0,
+                                               attempts_detail)
+                    break
+
+        def try_candidate(program: List[OP],
+                          families: List[str]) -> Optional[List[str]]:
+            nonlocal attempts, emulator_mismatch
+            if exhausted():
+                return None
+            explored[0] += 1
+            attempts += 1
+            for aile in families:
+                attempts_detail[aile] = attempts_detail.get(aile, 0) + 1
+            if not self.emulator.matches(program, egitim, registers):
+                return None
+            return [k for _, k, _ in program]
+
+        solution: Optional[List[str]] = None
+        cache: Dict[Tuple[str, Tuple[Tuple[str, int], ...]], bool] = {}
+
+        # Uzunluk 1: ağırlık sırasıyla tam tarama (sadece emülatör, sonra makine).
+        for prefix, code, fn in ordered:
+            solution = try_candidate([(prefix, code, fn)], [prefix])
+            if solution is not None:
+                kod_str = "\n".join(solution)
+                if (self._verify_real_all(asm, kod_str, egitim, registers, cache, deadline)
+                        and self._verify_real_all(asm, kod_str, sakli, registers, cache, deadline)):
+                    break
+                solution = None
+                emulator_mismatch += 1
+
+        # Uzunluk >= 2: beam search — her seviyede en iyi BEAM_WIDTH adayı tutar.
+        if solution is None:
+            beam: List[Tuple[List[OP], int]] = []
+            for prefix, code, fn in ordered:
+                key = (code,)
+                if exhausted():
+                    break
+                if state is not None and key in failure_cache:
+                    continue
+                if key in seen:
+                    continue
+                seen.add(key)
+                explored[0] += 1
+                puan = self.emulator.score([(prefix, code, fn)], egitim, registers)
+                beam.append(([(prefix, code, fn)], puan))
+            beam.sort(key=lambda item: -item[1])
+            beam = beam[:BEAM_WIDTH]
+
+            mevcut_uzunluk = 1
+            while (mevcut_uzunluk < self.curriculum[level].max_instructions
+                   and beam and solution is None
+                   and not exhausted()):
+                yeni_beam: List[Tuple[List[OP], int]] = []
+                for program, _ in beam:
+                    if exhausted():
+                        break
+                    for prefix, code, fn in ordered:
+                        yeni_program = program + [(prefix, code, fn)]
+                        anahtar = tuple(k for _, k, _ in yeni_program)
+                        if state is not None and anahtar in failure_cache:
+                            continue
+                        if anahtar in seen:
+                            continue
+                        seen.add(anahtar)
+                        explored[0] += 1
+                        puan = self.emulator.score(yeni_program, egitim, registers)
+                        yeni_beam.append((yeni_program, puan))
+                yeni_beam.sort(key=lambda item: -item[1])
+                beam = yeni_beam[:BEAM_WIDTH]
+                mevcut_uzunluk += 1
+
+                for program, puan in beam:
+                    if puan == len(egitim):
+                        kodlar = [k for _, k, _ in program]
+                        kod = "\n".join(kodlar)
+                        if (self._verify_real_all(asm, kod, egitim, registers, cache, deadline)
+                                and self._verify_real_all(asm, kod, sakli, registers, cache, deadline)):
+                            solution = kodlar
+                            attempts += 1
+                            aileler = [a for a, _, _ in program]
+                            for aile in aileler:
+                                attempts_detail[aile] = attempts_detail.get(aile, 0) + 1
+                            break
+                        emulator_mismatch += 1
+
+        # --- 2. Çözülen tek-komutluk programı primitik kütüphanesine ekle ---
+        if solution is not None and len(solution) == 1 and state is not None:
+            state.primitives.setdefault(ctx, [])
+            if solution[0] not in state.primitives[ctx]:
+                state.primitives[ctx].append(solution[0])
+
+        # --- 3. Çözülen programı AsmUzuv beynine kalıcı yaz ---
+        if solution is not None and asm is not None and record_to_brain:
+            kod_str = "\n".join(solution)
+            asm.program_kaydet(kod_str, ctx, deneme=attempts)
+
+        return SolveResult(
+            solved=solution is not None,
+            program=solution,
+            attempts=attempts,
+            emulator_mismatch=emulator_mismatch,
+            attempts_detail=attempts_detail,
+        )
+
+
+# --------------------------------------------------------------------------- Öğrenme döngüsü
+
+
+class AssemblyLearner:
+    """Zaman sınırlı öğrenme döngüsünü koordine eder."""
+
+    def __init__(self, asm: AsmUzuv, state: LearningState,
+                 curriculum: Dict[int, CurriculumLevel], ops: Sequence[OP],
+                 emulator: Emulator, rng: random.Random) -> None:
+        self.asm = asm
+        self.state = state
+        self.curriculum = curriculum
+        self.ops = ops
+        self.emulator = emulator
+        self.rng = rng
+        self.generator = TaskGenerator(emulator, ops, curriculum)
+        self.solver = BeamSearchSolver(emulator, ops, curriculum)
+        self.verify_cache: Dict[Tuple[str, Tuple[Tuple[str, int], ...]], bool] = {}
+
+    def run(self, minutes: float,
+            solution_path: Optional[Path] = None) -> None:
+        """``minutes`` dakika boyunca öğrenme döngüsünü çalıştırır."""
+        deadline = time.monotonic() + max(0.0, float(minutes)) * 60
+        solution_path = solution_path or (self.asm.uzuv_dir / "asm_cozumler.jsonl")
+
+        # Çift yönlü senkronizasyon: AsmUzuv'un hata derslerini başarısız önbelleğe aktar.
+        if self.asm is not None:
+            for pattern, _message in self.asm.hata_dersleri.items():
+                self.state.failures.setdefault("", set()).add((pattern,))
+
+        while time.monotonic() < deadline:
+            level = self.state.max_level
+            cfg = self.curriculum[level]
+            length = self.rng.randint(1, cfg.max_instructions)
+            task = self.generator.generate(
+                self.asm, self.rng, level, length,
+                max_attempts=20, deadline=deadline)
+            if task is None:
+                if time.monotonic() >= deadline:
+                    break
+                continue
+
+            ctx = context_key(task.training)
+            result = self.solver.solve(
+                self.asm, task, self.state.weights, self.rng, level, self.state,
+                record_to_brain=True, budget=2000, deadline=deadline,
+            )
+            solved_families = [op[0] for op in (task.program or [])]
+            self.state.weights.record_attempts(ctx, result.attempts_detail,
+                                               solved_families)
+            self.state.total_tasks += 1
+            self.state.history.append({
+                "seviye": level,
+                "uzunluk": length,
+                "cozuldu": result.solved,
+                "deneme": result.attempts,
+                "emu_yanilgi": result.emulator_mismatch,
+            })
+
+            if result.solved:
+                kod_str = "\n".join(result.program or [])
+                with open(solution_path, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps({
+                        "t": time.time(), "program": result.program,
+                        "seviye": level, "uzunluk": length,
+                        "deneme": result.attempts,
+                    }, ensure_ascii=False) + "\n")
+
+            # Müfredat ilerlemesi: son görevlerde >= %70 başarı → bir sonraki seviye.
+            son = [g for g in self.state.history[-40:]
+                   if g.get("seviye") == self.state.max_level][-20:]
+            if (len(son) >= 10
+                    and sum(g["cozuldu"] for g in son) / len(son) >= 0.70
+                    and self.state.max_level < CURRICULUM_MAX_LEVEL):
+                self.state.max_level += 1
+                logger.info(
+                    "müfredat: seviye %d (%s)",
+                    self.state.max_level,
+                    self.curriculum[self.state.max_level].name,
+                )
+
+            if self.state.total_tasks % 2 == 0:
+                self.state.save()
+                self.report()
+
+        self.state.save()
+        if self.asm is not None:
+            self.asm.log("asm_ogren", gorev=self.state.total_tasks,
+                         maks_seviye=self.state.max_level)
+
+    def report(self, n: int = 20) -> None:
+        """Son ``n`` görevin özetini yazdırır."""
+        son = self.state.history[-n:]
+        if not son:
+            print("henüz görev yok")
+            return
+        cozulen = [g for g in son if g["cozuldu"]]
+        ort = (sum(g["deneme"] for g in cozulen) / len(cozulen) if cozulen else 0)
+        toplam_primtik = sum(len(v) for v in self.state.primitives.values())
+        toplam_basarisiz = sum(len(s) for s in self.state.failures.values())
+        print(
+            f"[{self.state.total_tasks:4d}] son {len(son)}: "
+            f"çözüm %{100 * len(cozulen) // len(son)} | "
+            f"seviye {self.state.max_level} | ort. deneme {ort:.0f} | "
+            f"primtik {toplam_primtik} | başarısız önbellek {toplam_basarisiz}"
+        )
+
+
+# --------------------------------------------------------------------------- Karşılaştırma
+
+
+def compare(asm: AsmUzuv, state: LearningState, count: int,
+            seed: int = 7) -> None:
+    """Aynı görevlerde düz arama (ağırlık hep 1) ile öğrenilmiş ağırlığı karşılaştırır.
+
+    Öğrenmez, kaydetmez.
+    """
+    duz = {aile: 1.0 for aile in AILELER}
+    emulator = Emulator()
+    generator = TaskGenerator(emulator, OPS, CURRICULUM)
+    solver = BeamSearchSolver(emulator, OPS, CURRICULUM)
+    rng = random.Random(seed)
+    sonuc: Dict[str, List[Tuple[int, SolveResult]]] = {"düz": [], "öğrenilmiş": []}
+
+    for i in range(count):
+        level = min(state.max_level, CURRICULUM_MAX_LEVEL)
+        cfg = CURRICULUM[level]
+        length = rng.randint(1, cfg.max_instructions)
+        task = generator.generate(asm, rng, level, length)
+        if task is None:
+            continue
+        ctx = context_key(task.training)
+        for label, weights in (("düz", duz),
+                               ("öğrenilmiş", state.weights.weights(ctx, AILELER))):
+            task_rng = random.Random(seed * 1000 + i)
+            res = solver.solve(asm, task, weights, task_rng, level, None,
+                               record_to_brain=False)
+            sonuc[label].append((length, res))
+
+    for label, liste in sonuc.items():
+        cozulen = [r for _, r in liste if r.solved]
+        ort = (sum(r.attempts for r in cozulen) / len(cozulen) if cozulen else 0)
+        ortanca = (sorted(r.attempts for r in cozulen)[len(cozulen) // 2]
+                   if cozulen else 0)
+        print(f"{label:11}: {len(cozulen)}/{len(liste)} çözüldü | "
+              f"çözülenlerde ort. deneme {ort:.0f}, ortanca {ortanca}")
+
+
+# --------------------------------------------------------------------------- CLI
+
+
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description="x86-64 Assembly öğrenme organu")
+    ap.add_argument("--dakika", type=float, default=0,
+                    help="Öğrenme süresi (dakika)")
+    ap.add_argument("--kiyas", type=int, default=0,
+                    help="N görev üzerinde düz vs öğrenilmiş ağırlık karşılaştırması")
+    ap.add_argument("--rapor", action="store_true",
+                    help="Öğrenme raporu yazdır")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Rastgele sayı tohumu")
+    ap.add_argument("--kok", default=None,
+                    help="CORE kök dizini (varsayılan: bu dosyanın iki üst dizini)")
+    return ap
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    root = Path(args.kok).resolve() if args.kok else Path(__file__).resolve().parent.parent
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    asm = AsmUzuv(root=root)
+    state_path = asm.uzuv_dir / "asm_ogren.json"
+    state = LearningState(state_path)
+    state.load()
+
+    rng = random.Random(args.seed)
+    emulator = Emulator()
+    learner = AssemblyLearner(asm, state, CURRICULUM, OPS, emulator, rng)
+
+    if args.dakika:
+        learner.run(args.dakika)
+    if args.kiyas:
+        compare(asm, state, args.kiyas, seed=args.seed or 7)
+    if args.rapor or not (args.dakika or args.kiyas):
+        learner.report()
+        print(f"öğrenilen kalıp sayısı: {len(state.primitives)}")
+        for ctx in sorted(state.primitives,
+                          key=lambda c: -sum(v[1] for v in
+                                             state.weights.records.get(c, {}).values()))[:5]:
+            wmap = state.weights.weights(ctx, AILELER)
+            en_iyi = sorted(wmap, key=lambda a: -wmap[a])[:3]
+            print(f"  kalıp {ctx}: önce {', '.join(en_iyi)}")
+        asm.rapor()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
