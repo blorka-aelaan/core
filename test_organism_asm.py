@@ -28,7 +28,7 @@ class _Ust:
         self.run_calls = []
         self.save_calls = 0
 
-    def asm_öğren(self, dakika):
+    def asm_öğren(self, dakika, nn_ana=None):
         self.run_calls.append(dakika)
         return {
             "oturum_gorev": 10,
@@ -51,7 +51,7 @@ def _organism(energy, in_danger=False):
 organism = _organism(energy=50)
 result = organism._asm_ogren_komutunu_calistir()
 assert result["oturum_gorev"] == 10
-assert organism.ust.run_calls == [0.02]
+assert organism.ust.run_calls == [2.0]
 assert organism.ust.save_calls == 1
 assert organism.jour.events[-1][0] == "asm_ogren_dongu"
 

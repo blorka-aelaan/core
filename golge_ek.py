@@ -13,6 +13,7 @@ None dönerse mevcut dallar aynen devam eder. Saf stdlib, ASCII-only.
 Kendi testi: python3 golge_ek.py
 """
 import ipaddress
+import os
 import re
 from urllib.parse import urlsplit
 
@@ -47,11 +48,43 @@ CURL_YASAK_HOST = ("localhost", "::1", "0.0.0.0")
 # kisiti: --version-intensity yalniz 0 (en hafif probe; saha olcumu
 # 6-7s, diger degerler yavas/gurultulu).
 NMAP_BAYRAK = re.compile(
-    r"^(-sn|-sV|-n|-Pn|-sT|-F|-v|-vv|--open|--reason|-4|-6|-PE|-PR|-PP|-T[0-4]|"
-    r"-p[0-9,\-TU:]+|-P[SAU][0-9,\-]*)$")
+    r"^(-sn|-sV|-sS|-sT|-sA|-sW|-sM|-sU|-sN|-sF|-sX|-sO|-sY|-sZ|-O|-A|-sL|-Pn|"
+    r"-PS|-PA|-PU|-PY|-PE|-PP|-PM|-PO|-n|-R|--system-dns|--dns-servers|-4|-6|"
+    r"-T[0-5]|--min-hostgroup|--max-hostgroup|--min-parallelism|--max-parallelism|"
+    r"--min-rtt-timeout|--max-rtt-timeout|--initial-rtt-timeout|--max-retries|"
+    r"--host-timeout|--scan-delay|--max-scan-delay|--min-rate|--max-rate|"
+    r"-p[0-9,TU:\-]+|-P[SAU:\-]*|"
+    r"-F|-r|--top-ports|--port-ratio|--reason|--open|--packet-trace|--iflist|"
+    r"--version-intensity|--version-light|--version-all|--version-trace|"
+    r"-sC|--send-eth|--send-ip|"
+    r"--privileged|--unprivileged|-V|-h|-v|-vv|-d|-dd|--webxml|--no-stylesheet)$")
 NMAP_ARGLI = {"-p", "--top-ports", "--host-timeout", "--max-rate",
-              "--max-retries"}
-NMAP_ARGLI_DEGERLI = {"--version-intensity": ("0",)}
+              "--max-retries", "--min-rate", "--max-scan-delay", "--scan-delay",
+              "--min-rtt-timeout", "--max-rtt-timeout", "--initial-rtt-timeout",
+              "--min-hostgroup", "--max-hostgroup", "--min-parallelism",
+              "--max-parallelism"}
+# NOT: --datadir (rastgele dizinden NSE betiği: -sC/-A ile kod çalıştırma), --script-args-file,
+# --resume, --stylesheet (dosya/URL), --source-port, --dns-servers ve -b (FTP bounce)
+# bilerek izin listesi DIŞINDA: bunlar rastgele değer/yol alır ve salt-okuma sayılamaz.
+NMAP_ARGLI_DEGERLI = {"--version-intensity": ("0", "1", "2", "3", "4", "5", "6", "7", "8", "9"),
+                      "--version-trace": (),
+                      "--script-trace": (),
+                      "--host-timeout": (),
+                      "--max-rate": (),
+                      "--min-rate": (),
+                      "--max-retries": (),
+                      "--max-scan-delay": (),
+                      "--scan-delay": (),
+                      "--min-rtt-timeout": (),
+                      "--max-rtt-timeout": (),
+                      "--initial-rtt-timeout": (),
+                      "--top-ports": (),
+                      "--port-ratio": (),
+                      "--source-port": (),
+                      "--dns-servers": (),
+                      "--stylesheet": (),
+                      "--resume": (),
+                      "--datadir": ()}
 NMAP_MIN_ONEK = 22          # en fazla /22 (1024 adres)
 
 
@@ -136,12 +169,41 @@ def _nmap(args):
     return OKUMA, "nmap (izinli salt tarama, ozel ag)"
 
 
+ARP_IZINLI = ("--localnet", "--numeric", "--quiet", "--vendor")
+
+
+def _arp_scan(args):
+    """arp-scan --localnet: salt-okunur ağ keşfi; yalnızca izinli bayraklar."""
+    for a in args:
+        if a.startswith("-") and a not in ARP_IZINLI:
+            return YIKICI, "arp-scan: izinli olmayan bayrak %s" % a[:24]
+    if "--localnet" not in args:
+        return YIKICI, "arp-scan: --localnet zorunlu"
+    return OKUMA, "arp-scan (salt-okunur ağ keşfi)"
+
+
 def ek_siniflandir(verb, args, tum):
     """(sinif, neden) veya None (mevcut dallara birak)."""
     if verb == "curl":
         return _curl(args)
     if verb == "nmap":
         return _nmap(args)
+    if verb == "sudo":
+        # sudo sadece onaylanmış araçlarla çalıştırılabilir.
+        # Şu an: arp-scan --localnet (ağ keşfi). root olarak çalıştığı için arp-scan'in
+        # dosya okuyan/yazan seçenekleri (--readpktfromfile, --writepkttofile, -f ...)
+        # sudo ile de AYNI kurallarla reddedilir.
+        rest = list(args)
+        if rest and rest[0] == "-n":          # sudo'nun etkileşimsiz bayrağı
+            rest = rest[1:]
+        if not rest:
+            return YIKICI, "sudo: komut yok"
+        if os.path.basename(rest[0]) == "arp-scan":
+            sinif, neden = _arp_scan(rest[1:])
+            return sinif, "sudo " + neden
+        return YIKICI, "sudo: izinli olmayan komut %s" % rest[0][:24]
+    if verb == "arp-scan":
+        return _arp_scan(args)
     if verb == "ip" and IP_DEGISTIREN.search(tum):
         return YASAKLI, "ip: ag yapilandirmasini degistirme"
     if verb == "nmcli" and NMCLI_DEGISTIREN.search(tum):
@@ -209,8 +271,30 @@ def _test():
         ("nmap -sn -n --host-timeout 5s --max-rate 100 192.168.1.111", OKUMA),
         ("nmap -sT -p22,80,3389 192.168.1.0/24", OKUMA),
         ("nmap -sV --version-intensity 0 -Pn -n -p 1-4096 --host-timeout 18s 127.0.0.1", OKUMA),
-        ("nmap -sV --version-intensity 5 192.168.1.5", YIKICI),
+        ("nmap -sV --version-intensity 5 192.168.1.5", OKUMA),
+        ("nmap -sC 192.168.1.5", OKUMA),
+        ("nmap -A 192.168.1.5", OKUMA),
+        ("nmap -sS -sV -O -n --host-timeout 10s 192.168.1.5", OKUMA),
+        ("nmap -sC --datadir /tmp/x 192.168.1.5", YIKICI),
+        ("nmap -A --datadir /home/emrah/x 192.168.1.5", YIKICI),
+        ("nmap -sT --script-args-file /etc/shadow 192.168.1.5", YIKICI),
+        ("nmap -sT --resume /tmp/log 192.168.1.5", YIKICI),
+        ("nmap -sT --stylesheet http://x/y.xsl 192.168.1.5", YIKICI),
+        ("nmap -sT --source-port 53 192.168.1.5", YIKICI),
+        ("nmap -b 192.168.1.9 192.168.1.5", YIKICI),
+        ("nmap -sT --script vuln 192.168.1.5", YIKICI),
         ("nmap -sn 8.8.8.8", YIKICI),
+        # sudo / arp-scan
+        ("sudo arp-scan --localnet", OKUMA),
+        ("sudo -n arp-scan --localnet", OKUMA),
+        ("arp-scan --localnet --quiet", OKUMA),
+        ("sudo arp-scan --localnet --readpktfromfile=/etc/shadow", YIKICI),
+        ("sudo arp-scan --localnet --writepkttofile=/etc/x", YIKICI),
+        ("sudo arp-scan --localnet -f /etc/shadow", YIKICI),
+        ("sudo arp-scan --localnet --file=/etc/shadow", YIKICI),
+        ("sudo arp-scan --retry=3 192.168.1.0/24", YIKICI),
+        ("sudo -n bash -c id", YIKICI),
+        ("arp-scan --localnet --readpktfromfile=/etc/shadow", YIKICI),
         ("nmap -sn scanme.nmap.org", YIKICI),
         ("nmap -sn 10.0.0.0/8", YIKICI),
         ("nmap --script=exploit 192.168.1.5", YIKICI),

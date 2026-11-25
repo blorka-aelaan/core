@@ -23,8 +23,10 @@ Beyin bedenin bir parçasıdır: 10 tikte bir ve kapanışta atomik olarak
 brain.json'a yazılır (tmp + rename); doğuşta oradan yüklenir.
 """
 import json
+import math
 import os
 import random
+import statistics
 from collections import deque
 from pathlib import Path
 
@@ -40,6 +42,9 @@ AGIRLIK_TAVAN = 15.0    # ağırlık kırpma sınırı (şişme koruması)
 # Çaprazlar kombinatoryal olarak üretilir (N jeton → N(N-1)/2 çift), bu
 # yüzden otomatik KANIT toplarlar ve kanıt tablosunu gürültüyle doldurur.
 CAPRAZ_AYRAC = "×"
+
+
+SINIFLAR = ("Ölüm Tehlikesi", "Normal", "Mükemmel")
 
 
 class Brain:
@@ -140,17 +145,17 @@ class Brain:
         self.usage_tasma = {}
         # Working memory ödül takibi: (stim, action) -> gözlenen en iyi ödül
         self.working_rewards = {}
-        # ---------- Yeni: Yapıslé plastisite (nöron büyüme/silme) ----------
+        # ---------- Yeni: Yapısal plastisite (nöron büyüme/silme) ----------
         # Sık kullanılan (stim, action) çiftlerine göre sanal nöron ekleme
         self.neuron_id_counter = 0
         # Her sanal nöron: {(stim, action): weight}
         self.neurons = dict()  # neuron_id -> { (stim, action): weight }
         # Büyüme eşiği: usage'si bu seviyeye ulaştığında nöron açılır
-        self.NEUROON_BUYUME_ESI = 50
+        self.NÖRON_BUYUME_ESI = 50
         # Açılan nöronları koruma (tavanlamaya maruz kalmaz)
         self.korumali_neuronlar = set()
         # Maksimum nöron sayısı: bellek koruması
-        self.MAX_NEUROON = 50
+        self.MAX_NÖRON = 50
         # ---------- Yeni: Dinamik lr/epsilon ayarı ----------
         self.lr_min = 0.02
         self.lr_max = 0.25
@@ -166,7 +171,7 @@ class Brain:
         """Enerji, acı ve sıkılmaya göre lr ve epsilon'ı dinamik ayarla.
 
         - Düşük enerji / acı (yaşama tehlikesi): epsilon düşer (daha az keşif,
-          daha çok riflenen eylem), lr düşer (kararlı kal).
+          daha çok tercih edilen eylem), lr düşer (kararlı kal).
         - Yüksek enerji, düşük sıkılma: epsilon rises (daha çok keşfet).
         - Yüksek sıkılma: epsilon forced up (rutin kırılmalı).
         """
@@ -438,7 +443,6 @@ class Brain:
         Kullanım sayısına logaritmik olarak bağlıdır: ilk birkaç kullanım
         sonrası daralan bir artış.
         """
-        import math
         total = 0
         for f in self.features(stim):
             total += self.usage.get((f, action), 0)
@@ -924,9 +928,8 @@ class Brain:
     # Tek seferlik öğrenme (usage == 1) de zayıf kanıttır: bir deneme
     # sonucu, kararlı bir alışkanlığı göstermez.
     PRUNE_USAGE_MIN = 2       # bu kadar kez kullanılmadan korunmaz
-    # PRUNE_USAGE_KEEP: "eşiğe hiç bakılmaz" eşiği. Kodda ayrı bir
-    # dal olarak KULLANILMAZ (PRUNE_USAGE_MIN zaten her şeyi koruyor);
-    # belgelenmiş ama uygulanmayan bir sabit olduğu için not düşüldü.
+    # PRUNE_USAGE_KEEP: eski, artık etkisiz bir sabittir; PRUNE_USAGE_MIN
+    # zaten koruma eşiği olarak kullanılıyor. (Gelecek sürümde kaldırılabilir.)
     PRUNE_USAGE_KEEP = 10
 
     def _budama_adayi(self, esik):
@@ -1306,7 +1309,6 @@ class Brain:
           - kullanimsiz: usage == 0 olan bağlantı sayısı
           - az_kullanim: 0 < usage < PRUNE_USAGE_MIN olan bağlantı sayısı
         """
-        import statistics
         if not self.w:
             return {"toplam": 0}
         agirliklar = list(self.w.values())
@@ -1328,198 +1330,3 @@ class Brain:
             "az_kullanim": az_kullanim,
         }
 
-SINIFLAR = ("Ölüm Tehlikesi", "Normal", "Mükemmel")
-
-class OzHedef:
-    """Özgür hedefleme organi - merak odaklı kendi hefleri belirler."""
-    def __init__(self, brain, drives):
-        self.brain = brain
-        self.drives = drives
-        self._hedef = None
-        self._baslangic_tik = 0
-        self._sureci_tik = 0
-        self._gecmis = []
-
-    # -----------------------------------------------------------
-    # Bağlam Sınıflandırması
-    # -----------------------------------------------------------
-    def _baglam_klas(self, drives):
-        """İç durumu 'tehlike' / 'acık' / 'rahatlama' olarak sınıflandır."""
-        try:
-            energy = float(getattr(drives, "energy", 50.0))
-            hunger = float(getattr(drives, "hunger", 30.0))
-        except (TypeError, ValueError):
-            energy, hunger = 50.0, 30.0
-
-        pain = 0.0
-        try:
-            _p = getattr(drives, "pain", 0.0)
-            if callable(_p):
-                _p = _p()
-            pain = max(0.0, min(1.0, float(_p)))
-        except (TypeError, ValueError):
-            pain = 0.0
-
-        in_danger = bool(getattr(drives, "in_danger", False))
-
-        if in_danger or pain > 0.5 or energy < 30.0 or hunger > 85.0:
-            return "tehlike"
-        if energy < 60.0 or hunger > 50.0:
-            return "acık"
-        return "rahatlama"
-
-    # -----------------------------------------------------------
-    # Her Tick Güncelleme
-    # -----------------------------------------------------------
-    def guncelle(self, tik):
-        """Her ana döngü tickinde çağrılır. Özgür hedefler belirlenir."""
-        # 1. Sürpriz/merak ölçümlerini topla
-        novel = float(getattr(self.drives, "novel", 0.0))
-        merak = float(getattr(self.drives, "merak", 0.0))
-
-        self._novel_gecmisi = getattr(self, "_novel_gecmisi", [])
-        self._merak_gecmisi = getattr(self, "_merak_gecmisi", [])
-        self._novel_gecmisi.append(novel)
-        self._merak_gecmisi.append(merak)
-
-        # 2. Bağlamı belirle
-        baglam = self._baglam_klas(self.drives)
-        self._aktif_baglam = baglam
-
-        # 3. Yeni hedef mı oluştur?
-        yeni_hedef = False
-
-        # Bağlama özel eşikler ve faktörler
-        if baglam == "tehlike":
-            novel_esik = 0.7   # tehlikede daha yüksek novelty gerekir
-            merak_esik = 0.5   # ve merak
-            koruma_faktori = 0.5  # mevcut hefi korumaya daha empefyok
-        elif baglam == "acık":
-            novel_esik = 0.5   # normal eşik
-            merak_esik = 0.3
-            koruma_faktori = 1.0
-        else:  # rahatlama
-            novel_esik = 0.4   # rahattalama'da daha düşük eşik
-            merak_esik = 0.2
-            koruma_faktori = 0.8  # hafifpekti teşvik
-
-        # A) Yüksek novelty + yüksek merak + Henüz hedef yoksa → HEFI BELİRLE
-        context_condition = (novel > novel_esik and merak > merak_esik and self._hedef is None)
-
-        if context_condition:
-            # Bağlama göre hedef türü belirle
-            if baglam == "tehlike":
-                # Tehlikede "keşif" yerine "sıfırla" veya korunmaya odaklan
-                if self._sureci_tik < 50:  # Henüz yeni başlarsa keşif
-                    self._hedef = "keşif"
-                else:
-                    self._hedef = "sıfırla"  # Uzun süredir varsa terk et
-                self._baslangic_tik = tik
-                self._sureci_tik = 0
-                self._gecmis.append({
-                    "tik": tik,
-                    "hedef": self._hedef,
-                    "novel": novel,
-                    "merak": merak,
-                    "baglam": baglam
-                })
-                yeni_hedef = True
-            elif baglam == "acık":
-                # Açlık: normal keşif
-                self._hedef = "keşif"
-                self._baslangic_tik = tik
-                self._sureci_tik = 0
-                self._gecmis.append({
-                    "tik": tik,
-                    "hedef": "keşif",
-                    "novel": novel,
-                    "merak": merak,
-                    "baglam": baglam
-                })
-                yeni_hedef = True
-            else:  # rahatlama
-                # Rahatlama: keşif veya öğren
-                self._hedef = "keşif"
-                self._baslangic_tik = tik
-                self._sureci_tik = 0
-                self._gecmis.append({
-                    "tik": tik,
-                    "hedef": "keşif",
-                    "novel": novel,
-                    "merak": merak,
-                    "baglam": baglam
-                })
-                yeni_hedef = True
-        # B) Uzun süredir aynı hedef var ve sikiliniyorSA → TERK ET (koruma faktörü ile)
-        elif (self._hedef and
-              tik - self._baslangic_tik > 200 and
-              float(getattr(getattr(self.drives, "sikilan", 0), "sikilan", 0) if hasattr(self.drives, "sikilan") else 0) > 0.5 * koruma_faktori):
-            self._gecmis.append({
-                "tik": tik,
-                "hedef": "sıfırla",
-                "novel": novel,
-                "merak": merak,
-                "reason": "sikilan_yüksek",
-                "koruma_faktori": koruma_faktori
-            })
-            self._hedef = None
-            self._sureci_tik = 0
-            yeni_hedef = True
-        # C) Mevcut hefin süresi doldu → Yeni hedef ara
-        elif (self._hedef and
-              self._sureci_tik >= getattr(self, "_HEDEFLER", {}).get(self._hedef, {}).get("max_sure", 100)):
-            self._gecmis.append({
-                "tik": tik,
-                "hedef": self._hedef,
-                "novel": novel,
-                "merak": merak,
-                "reason": "süre_doldu"
-            })
-            self._hedef = None
-            self._sureci_tik = 0
-            yeni_hedef = True
-
-        # 3. Alt süreyi güncelle (varsa)
-        if self._hedef:
-            self._sureci_tik += 1
-
-        return yeni_hedef
-
-    # -----------------------------------------------------------
-    # Mevcut Hedefi Döndür
-    # -----------------------------------------------------------
-    def mevcut_hedef(self):
-        """Şu an aktif olan hedef string'i (None jika yok)."""
-        return self._hedef
-
-    # -----------------------------------------------------------
-    # Hedef Talimatı (Main.py için çıktı)
-    # -----------------------------------------------------------
-    def hedef_talimat(self):
-        """
-        Dışarıya (main.py/yu) verilecek hedef talimatı.
-        ['keşif'], ['öğren'] ya da None döner.
-        """
-        if self._hedef:
-            return [self._hedef]
-        return None
-
-    # -----------------------------------------------------------
-    # Rapor/İzleme
-    # -----------------------------------------------------------
-    def rapor(self):
-        """Güncel hedef durumu raporu."""
-        novel_ort = sum(getattr(self, "_novel_gecmisi", [0])) / max(1, len(getattr(self, "_novel_gecmisi", [0])))
-        merak_ort = sum(getattr(self, "_merak_gecmisi", [0])) / max(1, len(getattr(self, "_merak_gecmisi", [0])))
-        return {
-            "aktif_hedef": self._hedef,
-            "sureci_tik": self._sureci_tik,
-            "novel_ortalama": round(novel_ort, 3),
-            "merak_ortalama": round(merak_ort, 3),
-            "gecmis_sayisi": len(self._gecmis)
-        }
-
-
-# -----------------------------------------------------------
-SINIFLAR = ("Ölüm Tehlikesi", "Normal", "Mükemmel")
-# -----------------------------------------------------------

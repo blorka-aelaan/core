@@ -7,7 +7,7 @@
   "derinlik": 3,
   "haric": ["/proc", "/sys", "/dev", "/run", "/tmp", "/var/tmp", "/snap",
             "/dev/shm", "/var/lib/docker"],
-  "azami_klasor": 12000,
+  "azami_klasor": 100000,
   "klasor_siniri": 40,
   "derinlik_tavan": 8,
   "arama_deneme": 3,

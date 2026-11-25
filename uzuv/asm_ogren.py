@@ -41,6 +41,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
+
+
+# Gerçek beden erişim doğrulayıcı (openat/read/write/exit_group BPF allow-list).
+# Mevcut strict seccomp (sadece read/write/exit/sigreturn) ile open, read gibi
+# syscall'lar engellenir. Bu modül gerçek dosya erişimine izin veren bir alternatif sunar.
+try:
+    from uzuv.asm_dogrula_beden import dene_beden  # type: ignore
+except ImportError:  # pragma: no cover
+    dene_beden = None
+
 logger = logging.getLogger("asm_ogren")
 
 # Paket olarak içe aktarıldığında (örn. ``from uzuv.asm_ogren import ...``) göreli
@@ -254,6 +264,10 @@ def _mem_write_reg(ra: str, rb: str) -> Callable[[Dict[str, Any]], None]:
 
 # --------------------------------------------------------------------------- Op tablosu
 
+_EXACT_BONUS: float = 1000.0
+"""Tam eşleşen adaya verilen işaret puanı (sıralama bonuslarından ayrık)."""
+
+
 def build_ops() -> List[OP]:
     """Tüm desteklenen (aile, kod, fonksiyon) op üçlüsünü döndürür."""
     ops: List[OP] = []
@@ -364,6 +378,10 @@ def build_ops() -> List[OP]:
             cnt = state.get("rdx", 0)
             if fd == 1 and cnt > 0:
                 state["_wrote"] = state.get("_wrote", 0) + cnt
+        elif no == 2:  # open
+            state["rax"] = 3  # sabit fd döndür
+        elif no == 0:  # read
+            state["rax"] = 0  # simülasyon: okunamadı
         else:
             state["_unsupported_syscall"] = no
 
@@ -1199,8 +1217,8 @@ class BeamSearchSolver:
         """Başarısızlık kümesini sabit boyutla sınırlandır."""
         if len(kutu) <= 200:
             return kutu
-        # En az denenmiş (en eski/düşük sayaçlı) 190 elemanı tut
-        eder = sorted(kutu, key=lambda x: self._deneme_sayaci.get(x, 0))
+        # En çok tekrarlanan (en değerli) 190 başarısızlığı tut
+        eder = sorted(kutu, key=lambda x: -self._deneme_sayaci.get(x, 0))
         return set(eder[:190])
 
     def _kayıtla_basarisizlik(self,
@@ -1431,12 +1449,6 @@ class BeamSearchSolver:
                 )
             return float(weights.get(aile, 1.0))
 
-        # DÜZELTME 1: Ağırlık farklarını karekök ile yumuşat ve %15 rastgele keşif şansı tanı
-        def _sort_key(op: OP) -> Tuple[float, float]:
-            if rng.random() < 0.15:
-                return (0.0, rng.random())  # %15 keşif (exploration)
-            return (-(_w(op[0]) ** 0.5), rng.random())
-
         # DÜZELTME 2: Aileden çok yoğunlaşmaması için family-based scattering
         # Aile başına 3-4 adet al, kalanları karıştır, çevirilmiş sıralama yap
         families: Dict[str, List[OP]] = {}
@@ -1623,6 +1635,8 @@ class BeamSearchSolver:
                         attempts_detail[prefix] = attempts_detail.get(prefix, 0) + 1
                         tam_eslesme = self.emulator.score(yeni_program, egitim, registers)
                         puan = float(tam_eslesme)
+                        if tam_eslesme >= len(egitim):
+                            puan += _EXACT_BONUS
                         # Etiket varsa ve henüz atlama komutu eklenmediyse şans tanı
                         if (etiket_var or code.endswith(":")) and tam_eslesme < len(egitim):
                             puan += 0.5
@@ -1643,7 +1657,7 @@ class BeamSearchSolver:
                 mevcut_uzunluk += 1
 
                 for program, puan in beam:
-                    if int(puan) == len(egitim):
+                    if puan >= _EXACT_BONUS:
                         kodlar = [k for _, k, _ in program]
                         kod = "\n".join(kodlar)
                         if (self._verify_real_all(
@@ -1872,7 +1886,8 @@ class AssemblyLearner:
             # (kaydedilmiş durumdan gelen eskiler / aşırı değerler için).
             self.state.max_length = max(
                 2, min(self.state.max_length, cfg.max_instructions))
-            length = self.rng.randint(1, cfg.max_instructions)
+            length = self.rng.randint(
+                1, max(1, min(self.state.max_length, cfg.max_instructions)))
             task = self.generator.generate(
                 self.asm, self.rng, level, length,
                 max_attempts=20, deadline=deadline)
@@ -1901,7 +1916,8 @@ class AssemblyLearner:
 
             result = self.solver.solve(
                 self.asm, task, solve_weights, self.rng, level, self.state,
-                record_to_brain=True, deadline=deadline, max_length=None,
+                record_to_brain=True, deadline=deadline,
+                max_length=self.state.max_length,
             )
             # Dinamik alpha: nn_ana'nın başarı/başarısızlığını kaydet
             if nn_ana is not None and isinstance(solve_weights, NNWeightBlender):
@@ -1949,6 +1965,16 @@ class AssemblyLearner:
                     self._nn_ana_teach_count = getattr(self, "_nn_ana_teach_count", 0) + 1
                     if self._nn_ana_teach_count % 10 == 0:
                         nn_ana.kaydet()
+                # ---------- Gerçek beden erişim doğrulama ----------
+                if dene_beden is not None and result.solved:
+                    kod_str = "\n".join(result.program or [])
+                    if "syscall" in kod_str:
+                        s = dene_beden(kod=kod_str)
+                        if s["tamam"]:
+                            logger.info(
+                                "asm_ogren: gerçek beden erişim doğrulandı, eslesme=%s",
+                                s["eslesme"],
+                            )
             self.state.total_tasks += 1
             # Program uzunluğunu son 10 göreve göre uyarla: başarılıysa tam
             # müfredat uzunluğuna, düşük başarıysa daha kısa (ama en az 2

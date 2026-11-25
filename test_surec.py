@@ -8,7 +8,7 @@ from pathlib import Path
 
 from surec import Surec
 from organism import Organism
-import ust_beyn
+import noral_beyn as ust_beyn
 
 
 def _snapshot(cpu_ticks, cpu_total, cpu_idle, available_kb, extra=None):

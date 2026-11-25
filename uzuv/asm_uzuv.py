@@ -515,7 +515,9 @@ class AsmUzuv:
         self, kod, baslangic=None, baslangic_bellek=None, bellek_adresleri=None
     ):
         import sys
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        _d = os.path.dirname(os.path.abspath(__file__))
+        if _d not in sys.path:
+            sys.path.insert(0, _d)
         from asm_dogrula import dene
         return dene(
             kod,

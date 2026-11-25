@@ -482,30 +482,46 @@ class Uyku:
         ogrenme istatistiklerini kaydeder. AssemblyLearner zaten her
         guncellemede state'i kaydeder; uyku sirasinda ek guvenlik icin
         forzeli save yapilir ve istatistikler journal'e yazilir.
+
+        Var olan veri asla silinmez: bozuk/okunamayan dosya durumunda
+        veri = {} ile devam edilir ama dosya yazilmaz. Hata durumunda
+        -1 dondurulur (uyku logunda ayrintilendirilebilsin).
         """
         # AssemblyLearner state saved at uzuv/asm_ogren.json (see ust_beyn.py)
         yol = ROOT / "uzuv" / "asm_ogren.json"
         try:
             import json as _json
             try:
-                veri = _json.loads(yol.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
+                ham = yol.read_text(encoding="utf-8")
+            except OSError:
+                # Dosya yok: veri bos, isleme devam et (dosya yazilmaz)
+                ham = None
+            if ham is None:
+                veri = {}
+            else:
+                try:
+                    veri = _json.loads(ham)
+                except ValueError:
+                    # JSON bozuk: var olan dosyaya dokunma, veri bos
+                    veri = {}
+            if not isinstance(veri, dict):
                 veri = {}
             toplam_program = sum(
                 len(v) for v in veri.get("programs", {}).values()
             )
             toplam_agirlik = len(veri.get("bagil", {}))
             toplam_gorev = veri.get("total_tasks", 0)
-            self.jour.log(
-                "asm_ogren_konsolide",
-                program_sayisi=toplam_program,
-                agirlik_sayisi=toplam_agirlik,
-                toplam_gorev=toplam_gorev,
-            )
+            if getattr(self, "jour", None) is not None:
+                self.jour.log(
+                    "asm_ogren_konsolide",
+                    program_sayisi=toplam_program,
+                    agirlik_sayisi=toplam_agirlik,
+                    toplam_gorev=toplam_gorev,
+                )
             # Forzeli save: state zaten bellekteyse, diske yaz
             return toplam_program
         except Exception:
-            return 0
+            return -1
 
     # ---------- Nöral rüya: Uyku sırasında deneyim tekrarı ----------
     def _nn_usb_rüya(self, nn_usb) -> int:

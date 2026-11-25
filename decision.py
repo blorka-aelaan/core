@@ -12,7 +12,8 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-import ust_beyn as ust_beyn_mod
+import noral_beyn as ust_beyn_mod
+from ag_cevre import olay_alanlari
 
 
 class DecisionEngine:
@@ -20,7 +21,7 @@ class DecisionEngine:
 
     def __init__(
         self,
-        ust: ust_beyn_mod.UstBeyn,
+        ust: ust_beyn_mod.NöralUstBeyn,
         mind: Any,
         oz: Any,
         drives: Any,
@@ -62,6 +63,13 @@ class DecisionEngine:
         Eşikten düşük güven → KOMUT_YOK (pasif). Reddedilen kararlar
         kaydedilir (kilitlenme kırıcı için).
         """
+        # DÜZELTME (bayat ödül): ag_tara sonucu yalnızca BU tikte gerçekten
+        # tarama yapıldıysa geçerlidir. Sıfırlanmadığında bayrak sonsuza dek
+        # True kalıyor ve organism.py her tikte eski ödülü üst beyne yeniden
+        # besliyordu (journal: 5997 besleme / 4034 gerçek tarama).
+        self._ag_tara_sonuc = None
+        self._ag_tara_calisti = False
+
         komut, idx, guven, kaynak = self.ust.sec(
             sinyal_vektor, epsilon=epsilon
         )
@@ -85,25 +93,48 @@ class DecisionEngine:
             self._override_aktif = komut != ust_beyn_mod.KOMUT_YOK
             if self._override_aktif:
                 self.ust.komut_ayarla(komut, idx, sure=3)
+                self._kopru_bildir(komut, idx, kaynak)
                 # ag_tara override'ı: gerçek tarama adımını ag_beyin üzerinden yürüt
                 if komut == ust_beyn_mod.KOMUT_AG_TARA and self.ag_beyin is not None:
                     try:
+                        # Ödül, kararı seçtiren bağlamda öğrensin (sıfır vektörde değil)
+                        _kaydet = getattr(self.ust, "scan_sinyali_kaydet", None)
+                        if callable(_kaydet):
+                            _kaydet(sinyal_vektor)
                         sonuc = self.ag_beyin.scan_next_step(time.time())
                         self._ag_tara_sonuc = sonuc
                         self._ag_tara_calisti = sonuc is not None and sonuc.get("ok", False)
                         if self._ag_tara_calisti:
                             self.journal.log(
-                                "ag_tara_override_calisti",
+                                "ag_tara_override_sessiz"
+                                if sonuc.get("noop") else "ag_tara_override_calisti",
                                 step=sonuc.get("step"),
                                 probe=sonuc.get("probe"),
                                 hosts=sonuc.get("hosts"),
                                 ports=sonuc.get("ports"),
                                 reward=sonuc.get("probe_reward", 0.0),
                             )
+                        for olay in (sonuc or {}).get("olaylar", []):
+                            self.journal.log("ag_cevre_olay", **olay_alanlari(olay))
                     except Exception as e:
                         self._ag_tara_sonuc = None
                         self._ag_tara_calisti = False
                         self.journal.log("ag_tara_override_hata", hata=str(e)[:200])
+
+    def _kopru_bildir(self, komut: str, idx: int, kaynak: str) -> None:
+        """Öz hedef köprüsüne seçimi bildirir (soğuma) ve hedef etkisi varsa günlükler."""
+        kopru = getattr(self.ust, "hedef_kopru", None)
+        if kopru is None:
+            return
+        try:
+            kb = getattr(self.ust, "last_hedef_kopru", None) or {}
+            etki = kb.get(idx)
+            kopru.secim_bildir(komut)
+            if etki:
+                self.journal.log("oz_hedef_kopru", komut=komut, bias=round(float(etki), 4),
+                                 kaynak=kaynak, **{"etkenler": kopru.aciklama(komut).get("etkenler", [])})
+        except Exception as hata:
+            self.journal.log("oz_hedef_kopru_hata", hata=str(hata)[:200])
 
     # ------------------------------------------------------------------ feasible düzenle
 

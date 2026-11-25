@@ -29,7 +29,8 @@ class _Sleep:
     def karar(self):
         return {"ad": "hatira", "veri": 1}
 
-    def uyu(self, decision, beyn):
+    def uyu(self, decision, beyn, usb_beyn=None, ag_beyin=None,
+            nn_usb=None, nn_ag=None, nn_ana=None, asm_ogren=None):
         self.calls.append((decision, beyn))
         return {"ad": "hatira", "kod": 0, "sure": 0.1}
 
@@ -38,9 +39,15 @@ def _organism(root, energy, hunger):
     organism = Organism.__new__(Organism)
     organism.uyku = _Sleep()
     organism.drives = SimpleNamespace(energy=energy, hunger=hunger)
-    organism.mind = object()
+    organism.mind = SimpleNamespace(calisma_bellekten_konsolide=lambda **kw: 0)
     organism.jour = _Journal()
     organism.root = root
+    organism.usb_beyn = SimpleNamespace()
+    organism.ag_beyin = SimpleNamespace()
+    organism.nn_usb = SimpleNamespace()
+    organism.nn_ag = SimpleNamespace()
+    organism.nn_ana = SimpleNamespace()
+    organism.ust = SimpleNamespace(asm_sistemi=lambda: None)
     organism.dam = SimpleNamespace(_disk_mtime=None)
     organism.guv = None
     organism.paket_beyin = None

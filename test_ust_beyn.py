@@ -13,11 +13,11 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from ust_beyn import (CIKIS_BOYUT, GIZLI_BOYUT, IDX_ACLIK, IDX_GOREV, IDX_MESAJ_VAR,
+from noral_beyn import (CIKIS_BOYUT, GIZLI_BOYUT, IDX_ACLIK, IDX_GOREV, IDX_MESAJ_VAR,
                       IDX_OLUM_RISK, IDX_SIKILMA, IDX_TEHLIKE, KOMUT_ACIL_DINLEN,
                       KOMUT_ACIL_YEM, KOMUT_ASM_OGREN, KOMUT_INDEKSI, KOMUT_KAPAT_AG,
                       KOMUT_KISITLA_DOSYA, KOMUT_YOK,
-                      SINYAL_BOYUT, TinyMLP, UstBeyn)
+                      SINYAL_BOYUT, NöralBeyn, NöralUstBeyn)
 
 hata = []
 
@@ -27,13 +27,13 @@ def kontrol(kosul, mesaj):
         hata.append(mesaj)
 
 
-class _Ust(UstBeyn):
+class _Ust(NöralUstBeyn):
     """Ağır kurulum olmadan test için sahte üst beyin."""
 
     def __init__(self):
         self.cfg = {}
         self.rng = __import__("random").Random(1)
-        self.mlp = TinyMLP(SINYAL_BOYUT, GIZLI_BOYUT, CIKIS_BOYUT, seed=1)
+        self.mlp = NöralBeyn("test_ust", [SINYAL_BOYUT, GIZLI_BOYUT, CIKIS_BOYUT], seed=1)
         self.epsilon = 0.15
         self.epsilon_min = 0.05
         self.epsilon_decay = 0.99985
@@ -76,6 +76,20 @@ class _Ust(UstBeyn):
         self.kisa_hafiza = __import__("collections").deque(maxlen=64)
         self.hata_kategorisi = {}
         self.ag_beyin = None  # ag_beyin entegrasyonu (testlerde yok)
+        # ---------- VSA (Vektör Sembolik Mimari) Zamansal Bağlam ----------
+        self.onceki_sinyal = None   # S_{t-1}
+        self.onceki_niyet = None    # E_{t-1}
+        # ---------- Yeni: Kavram Hafızası (Associative Memory) ----------
+        self.kavram_prototipi = []
+        self.kavram_max = 256
+        self.eylem_katalogu = {
+            "bilgi_topla": {"risk": 0.15, "cost": 0.20, "gain": 0.75, "requires_verification": False},
+            "dosya_tara": {"risk": 0.25, "cost": 0.30, "gain": 0.85, "requires_verification": False},
+            "network_tara": {"risk": 0.45, "cost": 0.50, "gain": 0.90, "requires_verification": True},
+            "asm_ogren": {"risk": 0.55, "cost": 0.65, "gain": 0.95, "requires_verification": True},
+            "komut_ver": {"risk": 0.70, "cost": 0.55, "gain": 0.80, "requires_verification": True},
+            "dogrula": {"risk": 0.10, "cost": 0.30, "gain": 0.85, "requires_verification": False},
+        }
 
 
 # --- asm_ogren() komut süresini gerçek istekle eşleştirir ---
@@ -89,7 +103,7 @@ class _AsmLearner:
             "total_tasks": 0,
             "max_level": 1,
         })()
-    def run(self, minutes):
+    def run(self, minutes, nn_ana=None, stim_features=None):
         self.run_calls.append(minutes)
 
 ust_asm = _Ust()
@@ -100,7 +114,7 @@ kontrol(asm_learner.run_calls == [2.5],
         "asm_ogren() istenen dakikayi kullanmadi: %s" % asm_learner.run_calls)
 
 with tempfile.TemporaryDirectory() as temp_dir:
-    ust_no_seed = UstBeyn({}, root=Path(temp_dir), seed=None)
+    ust_no_seed = NöralUstBeyn({}, root=Path(temp_dir), seed=None)
     kontrol(ust_no_seed.asm_sistemi() is not None,
             "seed=None ile ASM öğrenme sistemi başlatılamadı")
 
@@ -129,15 +143,15 @@ x = np.zeros(SINYAL_BOYUT)
 # --- 1) hedef vektörü toplamı 1, negatif değer yok ---
 for odul in (0.5, -0.5, 1.0, -1.0, 0.0):
     yakalanan = {}
-    _eski = ust.mlp.backward
+    _eski = ust.mlp.öğren
 
-    def _yakala(xv, hedef, **kw):
+    def _yakala(giris, hedef, **kw):
         yakalanan["hedef"] = np.array(hedef, dtype=float)
-        return _eski(xv, hedef, **kw)
+        return _eski(giris, hedef, **kw)
 
-    cast(Any, ust.mlp).backward = _yakala
+    cast(Any, ust.mlp).öğren = _yakala
     ust.ogren(x, 3, odul)
-    cast(Any, ust.mlp).backward = _eski
+    cast(Any, ust.mlp).öğren = _eski
     h = yakalanan.get("hedef")
     kontrol(h is not None, "hedef yakalanmadi (odul=%s)" % odul)
     if h is not None:
@@ -260,7 +274,7 @@ x4 = np.zeros(SINYAL_BOYUT)
 x4[1] = 0.9                            # açlık yüksek
 for _ in range(600):
     ust4.ogren(x4, 2, 0.8)
-probs = ust4.mlp.predict(x4)
+probs = ust4.mlp.tahmin(x4)
 kontrol(probs[2] > ust4.guven_esigi,
         "model guven esigine ulasmadi (%.3f <= %.2f) — KILITLENME"
         % (probs[2], ust4.guven_esigi))
@@ -275,16 +289,23 @@ ust5 = _Ust()
 ust5.epsilon = 0.0
 for _ in range(300):
     ust5.ogren(x, 3, 1.0)             # "kapat_ag" iyi
-p_iyi = float(ust5.mlp.predict(x)[3])
+p_iyi = float(ust5.mlp.tahmin(x)[3])
 for _ in range(300):
     ust5.ogren(x, 4, -1.0)            # "kisitla_dosya" kötü
-p_kotu = float(ust5.mlp.predict(x)[4])
+p_kotu = float(ust5.mlp.tahmin(x)[4])
 kontrol(p_kotu < p_iyi,
         "cezali komut iyi komuttan daha yuksek olasilik: %.3f >= %.3f"
         % (p_kotu, p_iyi))
 kontrol(p_kotu < ust5.guven_esigi,
         "cezali komut hala guven esiginin ustunde: %.3f" % p_kotu)
 
+import os
+from zeka import yol as zeka_yol
+# Önceki testlerin ağırlıklarını temizle (test izolasyonu)
+_tty = zeka_yol("nn_test_ust.json")
+if os.path.exists(_tty):
+    os.remove(_tty)
+    
 # --- 10) TAM KİLİTLENME SİMÜLASYONU ---
 # main.py'deki gerçek akışın tamamı taklit edilir:
 #   sec() → komut_uygulanabilir_mi() → reddedildiyse ceza →
@@ -335,7 +356,7 @@ kontrol(reddedilen < 290,
         % reddedilen)
 # Marj tabanlı güven eşiği geçebilmeli (ham olasılık DEĞİL marj).
 # Ölçüm, modelin karar verdiği komut üzerinden yapılır.
-probs6 = ust6.mlp.predict(xs)
+probs6 = ust6.mlp.tahmin(xs)
 _k6, _i6, _gv6, _kaynak6 = ust6.sec(xs)
 g6 = ust6._guven_hesapla(probs6, _i6)
 kontrol(g6 > ust6.guven_esigi,
@@ -373,8 +394,8 @@ with tempfile.TemporaryDirectory() as dtmp:
     yol = Path(dtmp) / "ust.json"
     yol.write_text(json.dumps({
         "surum": 2,
-        "W1": ust.mlp.W1.tolist(), "b1": ust.mlp.b1.tolist(),
-        "W2": ust.mlp.W2.tolist(), "b2": ust.mlp.b2.tolist(),
+        "W1": ust.mlp.W1, "b1": ust.mlp.b1,
+        "W2": ust.mlp.W2, "b2": ust.mlp.b2,
         "samples": 5, "tik": 5, "epsilon": 0.1,
         "secim_sayilari": [0] * CIKIS_BOYUT,
         "dogrulama": [0.0] * CIKIS_BOYUT,
@@ -497,14 +518,14 @@ with tempfile.TemporaryDirectory() as dtmp:
     # ESKİ kayıt biçimi: dogrulama_baglam alanı YOK
     yol.write_text(json.dumps({
         "surum": 2,
-        "W1": ust.mlp.W1.tolist(), "b1": ust.mlp.b1.tolist(),
-        "W2": ust.mlp.W2.tolist(), "b2": ust.mlp.b2.tolist(),
+        "W1": ust.mlp.W1, "b1": ust.mlp.b1,
+        "W2": ust.mlp.W2, "b2": ust.mlp.b2,
         "samples": 5, "tik": 5, "epsilon": 0.1,
         "secim_sayilari": [0] * CIKIS_BOYUT,
         "dogrulama": [0.0] * CIKIS_BOYUT,
         "guven_esigi": 0.3, "dogrulama_esigi": 0.35,
         "sure_azami": 0, "reddedilen": 0}), encoding="utf-8")
-    yeni = UstBeyn({}, kok)
+    yeni = NöralUstBeyn({}, kok)
     kontrol(yeni.samples == 5, "eski kayit yuklenmedi: samples=%s" % yeni.samples)
     kontrol(yeni.dogrulama_bağlam == {},
             "eski kayit bos baglam deposu vermedi")
@@ -517,7 +538,7 @@ with tempfile.TemporaryDirectory() as dtmp:
     kontrol(veri.get("dogrulama_baglam", {}).get("2|b1") == 1.25,
             "dogrulama_baglam degeri yanlis: %s"
             % veri.get("dogrulama_baglam"))
-    tekrar = UstBeyn({}, kok)
+    tekrar = NöralUstBeyn({}, kok)
     kontrol(tekrar.dogrulama_bağlam.get((2, "b1")) == 1.25,
             "dogrulama_baglam geri yuklenmedi: %s" % tekrar.dogrulama_bağlam)
 
@@ -532,7 +553,7 @@ x_aclik2[IDX_ACLIK] = 0.9          # yalnızca açlık (tehlike/mesaj yok)
 # Modeli bilerek "acil_dinlen" (tehlike gerektirir) lehine eğit.
 for _ in range(300):
     ust_m1.ogren(x_aclik2, KOMUT_INDEKSI[KOMUT_ACIL_DINLEN], 1.0)
-_probs_m1 = ust_m1.mlp.predict(x_aclik2)
+_probs_m1 = ust_m1.mlp.tahmin(x_aclik2)
 kontrol(_probs_m1[KOMUT_INDEKSI[KOMUT_ACIL_DINLEN]]
         > _probs_m1[KOMUT_INDEKSI[KOMUT_ACIL_YEM]],
         "test oncesi: model uygunsuz komutu ogrenmedi (hazirlik hatasi)")
@@ -558,7 +579,7 @@ _m3 = ust_m3.uygun_maske(x_aclik2)
 kontrol(not _m3[KOMUT_INDEKSI[KOMUT_YOK]],
         "KOMUT_YOK maskesi kapatilmadi")
 # Maske asla boş kalmaz → pasif kilitlenme olmaz.
-kontrol(ust_m3.uygun_maske(np.zeros(SINYAL_BOYUT)).any(),
+kontrol(any(ust_m3.uygun_maske(np.zeros(SINYAL_BOYUT))),
         "maske tamamen bos kaldi — guvenli varsayilan yok")
 
 # --- 20) HEDEF VEKTÖRÜ: UYGUNSUZ KOMUTLAR SIFIR HEDEF ALIR ---

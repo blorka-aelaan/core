@@ -2,6 +2,8 @@
 """Adaptif yeme ve güvenli keşif davranışı regresyon testleri."""
 
 from types import SimpleNamespace
+from pathlib import Path
+import tempfile
 
 from drives import Drives
 from organism import Organism
@@ -36,7 +38,9 @@ def test_eating_tracks_need():
     assert drives.needs_food
 
     organism = object.__new__(Organism)
+    organism.root = Path(tempfile.mkdtemp())
     organism.drives = drives
+    organism.bod = SimpleNamespace()
     organism.kul = SimpleNamespace(eylemler=lambda: ["cmd:ls", "help:ls"])
     assert "eat" in organism._hesapla_feasible()
 
@@ -53,7 +57,9 @@ def test_eating_tracks_need():
 
 def test_safe_exploration_schedule():
     organism = object.__new__(Organism)
+    organism.root = Path(tempfile.mkdtemp())
     organism.drives = make_drives()
+    organism.bod = SimpleNamespace()
     organism.hedef_tip = None
     assert organism.drives.safe_to_explore
     assert organism._kesif_araligi() == 40

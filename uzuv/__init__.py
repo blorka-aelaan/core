@@ -23,7 +23,7 @@ if _uzuv_py.exists():
     if _spec is not None and _spec.loader is not None:
         _uzuv_mod = importlib.util.module_from_spec(_spec)
         _spec.loader.exec_module(_uzuv_mod)
-        for _ad in ("LIM", "Uzuv", "ozellikler", "son_cekim"):
+        for _ad in ("LIM", "Uzuv", "ozellikler", "son_cekim", "VERI", "defter_oku", "etiket", "SINIFLAR", "zeka"):
             if hasattr(_uzuv_mod, _ad):
                 globals()[_ad] = getattr(_uzuv_mod, _ad)
 else:

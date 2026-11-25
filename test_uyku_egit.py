@@ -46,6 +46,8 @@ class UykuTest(unittest.TestCase):
         self.now = time.time()
         self.u = uyku.Uyku({})
         self._taze()
+        # asm_ogren HATLAR'da yok, son'da eksik kalir; elle ekle
+        self.u.son.setdefault("asm_ogren", {"t": self.now, "veri": 0, "damga": 0.0})
 
     def tearDown(self):
         uyku.ROOT, uyku.zeka, uyku.subprocess.run = self._eski
@@ -71,6 +73,12 @@ class UykuTest(unittest.TestCase):
     def test_hatira_esik_altinda_tetiklenmez(self):
         with open(self.kok / "journal.jsonl", "ab") as f:
             f.write(b"x" * 1000)
+        # journal boyutu degisti; usb hatiasi icin de damgayi esitle ki
+        # sadece hatira bayt esigi degerlendirilebilsin
+        jboyut = float((self.kok / "journal.jsonl").stat().st_size)
+        for ad in ("usb", "ag", "asm_ogren", "rüya"):
+            if ad in self.u.son:
+                self.u.son[ad]["damga"] = jboyut
         self.assertIsNone(self.u.karar(now=self.now))
 
     def test_oncelik_en_eski_once(self):

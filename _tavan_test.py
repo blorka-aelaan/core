@@ -1,6 +1,6 @@
 import numpy as np
 import random
-import ust_beyn as ub
+import noral_beyn as ub
 
 SIN = ub.SINYAL_BOYUT
 CIK = ub.CIKIS_BOYUT
@@ -8,7 +8,7 @@ YOK = ub.KOMUT_INDEKSI[ub.KOMUT_YOK]
 KOM = ub.KOMUTLAR
 
 
-class Mini(ub.UstBeyn):
+class Mini(ub.NöralNöralUstBeyn):
     """Gerçek UstBeyn davranışını taklit eden hafif simülasyon.
 
     Not: gerçek UstBeyn.__init__ yerine bu sınıf kullanılır çünkü
@@ -18,7 +18,7 @@ class Mini(ub.UstBeyn):
     def __init__(self):
         self.cfg = {}
         self.rng = random.Random(1)
-        self.mlp = ub.TinyMLP(SIN, ub.GIZLI_BOYUT, CIK, seed=1)
+        self.mlp = ub.NöralBeyn("test", [SIN, ub.GIZLI_BOYUT, CIK], seed=1)
         self.epsilon = 0.15
         self.epsilon_min = 0.05
         self.epsilon_decay = 0.99985

@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional
 
+from ag_cevre import CevreIzleyici
 from social_learning import SocialLearning
 
 PORTS = (22, 23, 53, 80, 139, 443, 445, 554, 631, 3389, 8008, 8009,
@@ -316,6 +317,7 @@ class AgBeyin:
         root: Path | str,
         runner: Callable[..., Any] = subprocess.run,
         clock: Callable[[], float] = time.time,
+        cevre_modu: Optional[bool] = None,
     ) -> None:
         self.root = Path(root)
         self.path = self.root / "zeka" / "ag_beyin.json"
@@ -323,7 +325,56 @@ class AgBeyin:
         self.scope_path = self.root / "ag_kapsam.json"
         self.runner = runner
         self.clock = clock
+        # cevre_modu: None → ag_kapsam.json'daki "cevre_modu" anahtarı (varsayılan: klasik)
+        self._cevre_modu_arg = cevre_modu
+        self._cevre: Optional[CevreIzleyici] = None
+        self._kapsam_onbellek: tuple[float, Dict[str, Any]] = (-1.0, {})
         self.data = self._load()
+
+    # ---------- Çevre modu: arp-scan + olay güdümlü tarama (bkz. ag_cevre.py) ----------
+    def _kapsam_ayar(self) -> Dict[str, Any]:
+        """ag_kapsam.json ham ayarı (değişiklik anında geçerli, mtime önbellekli)."""
+        try:
+            mtime = self.scope_path.stat().st_mtime
+        except OSError:
+            return {}
+        if mtime != self._kapsam_onbellek[0]:
+            try:
+                ham = json.loads(self.scope_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                ham = {}
+            self._kapsam_onbellek = (mtime, ham if isinstance(ham, dict) else {})
+        return self._kapsam_onbellek[1]
+
+    @property
+    def cevre_modu(self) -> bool:
+        if self._cevre_modu_arg is not None:
+            return bool(self._cevre_modu_arg)
+        return self._kapsam_ayar().get("cevre_modu") is True
+
+    def _get_cevre(self) -> CevreIzleyici:
+        if self._cevre is None:
+            self._cevre = CevreIzleyici(
+                self.root, runner=self.runner, clock=self.clock,
+                kapsam_fn=self._scope, ayar_fn=self._kapsam_ayar,
+            )
+        return self._cevre
+
+    def cevre_baglanti_gozlemi(self, conn_info: dict) -> list:
+        """Pasif bağlantı gözleminden anormal istek tespiti (çevre modunda)."""
+        if not self.cevre_modu:
+            return []
+        return self._get_cevre().baglanti_gozlemi(conn_info, self.clock())
+
+    def _cevre_adim(self, now: float) -> Dict[str, Any]:
+        sonuc = self._get_cevre().adim(now)
+        if not sonuc.get("noop"):
+            self.data["last_scan"] = {
+                key: sonuc.get(key) for key in
+                ("t", "ok", "probe", "hosts", "ports", "probe_reward", "step", "reason")
+            }
+            self.save()
+        return sonuc
 
     def _load(self) -> Dict[str, Any]:
         if not self.path.exists():
@@ -518,6 +569,8 @@ class AgBeyin:
 
     def next_due_in(self, now: Optional[float] = None) -> float:
         now = self.clock() if now is None else float(now)
+        if self.cevre_modu:
+            return self._get_cevre().due_in(now)
         recent = self._recent_scans(now)
         if not recent:
             return 0.0
@@ -744,6 +797,8 @@ class AgBeyin:
           2. Port taraması (nmap -sT -p...): adım1'deki canlı IP'lere port tarası.
           3. msfconsole safe recon (plan_only): gerçek yürütülmez, yalnızca plan kaydı.
         """
+        if self.cevre_modu:
+            return self._cevre_adim(now)
         state = self.data.setdefault(
             "scan_state",
             {"step": 1, "live_hosts": [], "last_networks": [], "step_started_at": 0},
@@ -1451,9 +1506,17 @@ class AgBeyin:
         now = self.clock() if now is None else float(now)
         recent = self._recent_scans(now)
         devices = []
+        def _ip_sirasi(satir: Any) -> tuple:
+            # devices sözlüğü, learn_traffic'in IP olmayan anahtarlarını da içerir
+            try:
+                return (0, int(ipaddress.ip_address(satir[0])))
+            except ValueError:
+                return (1, 0)
+
         for ip, device in sorted(
-            self.data["devices"].items(),
-            key=lambda row: int(ipaddress.ip_address(row[0])),
+            ((k, v) for k, v in self.data["devices"].items()
+             if _ip_sirasi((k, v))[0] == 0),
+            key=_ip_sirasi,
         ):
             ports = []
             for key, evidence in sorted(device.get("ports", {}).items()):
@@ -1505,6 +1568,7 @@ class AgBeyin:
             "probe_learning": self.data.get("probe_learning", {}),
             "social_learning": self.data.get("social_learning", {}),
             "consolidation": self.data.get("consolidation", {}),
+            "cevre": self._get_cevre().ozet() if self.cevre_modu else None,
         }
 
     def stimulus_tokens(self) -> list[str]:

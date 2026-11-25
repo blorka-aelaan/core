@@ -32,8 +32,9 @@ import meta_ogrenme as meta_ogrenme_mod
 import surec as surec_mod
 import home_world as home_world_mod
 import uzuv as uzuv_mod
-import ust_beyn as ust_beyn_mod
+import noral_beyn as ust_beyn_mod
 import reward as reward_mod
+from ag_cevre import olay_alanlari
 from decision import DecisionEngine
 from lifecycle import LifecycleManager
 
@@ -87,6 +88,21 @@ class Organism:
         self.dam = dam
         self.meta = meta
         self.oz = oz
+        # Öz-hedef deposu brain dosyasının yanında kalıcı tutulur (zeka/oz_hedef.json)
+        try:
+            if (hasattr(self.oz, "kalici_yol_ayarla")
+                    and getattr(self.oz, "kalici_yol", None) is None):
+                self.oz.kalici_yol_ayarla(Path(brain_path).parent / "oz_hedef.json")
+            if hasattr(self.oz, "olcum_ayarla"):
+                self.oz.olcum_ayarla(Path(brain_path).parent.parent)
+        except Exception:
+            pass  # kalıcılık best-effort; hedef deposu bellekte çalışmaya devam eder
+        # Öz hedef köprüsü: hedefler üst beynin komut seçimine sınırlı bias ekler
+        try:
+            if hasattr(self.oz, "kopru_olustur") and hasattr(self.ust, "hedef_kopru"):
+                self.ust.hedef_kopru = self.oz.kopru_olustur(list(noral_beyn_mod.KOMUTLAR))
+        except Exception:
+            pass  # köprü olmadan karar akışı eskisi gibi sürer
         self.dusun = dusun
         self.atolye = atolye
         self.sur = sur
@@ -102,6 +118,8 @@ class Organism:
         self.nn_usb = noral_beyn_mod.NöralBeyn("usb", [6, 5, 3], lr=0.15)
         self.nn_ag = noral_beyn_mod.NöralBeyn("ag", [6, 5, 3], lr=0.15)
         self.nn_ana = noral_beyn_mod.NöralBeyn("ana", [48, 256, 5], lr=0.12)
+
+        # Zamansal bağlam (S_{t-1}, E_{t-1}) NöralUstBeyn'de tutulur: ust.zamansal_guncelle()
         self.hedef_tip = hedef_tip
         self.home_world = home_world_mod.HomeWorld(
             cfg.get("environment", {})
@@ -279,6 +297,10 @@ class Organism:
         # ---------- 3. Üst beyin override ----------
         self.decision.asm_son = None
         self.decision.sec_override(stim_ust, epsilon=self._epsilon_tik())
+        # GERÇEKTEN uygulanan komut (reddedilme / ε-keşif sonrası): E_{t-1} ve ΔS tahmin hatası için.
+        _eu = getattr(self.ust, "eylem_uygulandi", None)
+        if _eu is not None:
+            _eu(self.decision.idx_ust)
         asm_requested = (
             self.decision.override_aktif
             and self.decision.komut_ust == ust_beyn_mod.KOMUT_ASM_OGREN
@@ -579,6 +601,9 @@ class Organism:
                 _baglantilar = res.get("baglanti_detay", []) or []
                 for _b in _baglantilar[:20]:
                     _t = self.ag_beyin.learn_traffic(_b)
+                    # Çevre modu: bilinen cihazdan anormal istek / tanınmayan IP tespiti
+                    for _olay in self.ag_beyin.cevre_baglanti_gozlemi(_b):
+                        self.jour.log("ag_cevre_olay", **olay_alanlari(_olay))
                     # ---------- Nöral beyin: Ağ trafiğinden öğren ----------
                     _lp = float(_b.get("local_port", 0)) / 65535.0
                     _rp = float(_b.get("remote_port", 0)) / 65535.0
@@ -891,6 +916,9 @@ class Organism:
         # Üst beyin öğrenmesi (yalnızca gerçek karar olduğunda)
         self._odul_ust = upper_reward
         if not self.decision.reddedildi_ust:
+            # Sezgi artık ödülü sonradan süslemiyor: NöralUstBeyn.sec() içinde k-en-yakın
+            # sahneden karar önyargısı olarak kullanılır. Hafızaya yazılan ödül HAM kalır
+            # (eski +0.2·proto_ödül, organizmanın kendi tahminini ödül sanmasına yol açıyordu).
             self.ust.ogren(
                 self._sinyal_ust,
                 self.decision.idx_ust,
@@ -918,6 +946,7 @@ class Organism:
                 step=_scan.get("step"),
                 probe=_scan.get("probe"),
                 odul=_odul,
+                sessiz=bool(_scan.get("noop", False)),
             )
 
         # Canlı durum: web paneli için enerji / açlık / ödül verisi
@@ -940,6 +969,14 @@ class Organism:
             ilerleme=bool(res.get("ilerleme", False)),
             gorev_sonucu=res.get("gorev_sonucu"),
             deneme=res.get("deneme"),
+            # ---------- Yeni: Ruh hali / mood vektörü (Aşama 9) ----------
+            mood_mutluluk=getattr(self.drives, "mood", {}).get("mutluluk", 0),
+            mood_korku=getattr(self.drives, "mood", {}).get("korku", 0),
+            mood_guven=getattr(self.drives, "mood", {}).get("guven", 0),
+            mood_merak=getattr(self.drives, "mood", {}).get("merak", 0),
+            mood_sikilma=getattr(self.drives, "mood", {}).get("sikilma", 0),
+            mood_dominant=getattr(self.drives, "mood_dominant", "-"),
+            mood_beden_baski=getattr(self.drives, "mood", {}).get("beden_baski", 0),
         )
 
         self.recent.append((stim, act))
@@ -1201,6 +1238,8 @@ class Organism:
             return
         if sonuc is None:
             return
+        for _olay in sonuc.get("olaylar", []) or []:
+            self.jour.log("ag_cevre_olay", **olay_alanlari(_olay))
         if sonuc.get("skipped"):
             self.jour.log("ag_envanter_atlandi", neden=sonuc.get("reason"))
         elif sonuc.get("ok"):
@@ -1387,6 +1426,7 @@ class Organism:
             return None
         sonuc = self.ust.asm_öğren(
             dakika=2.0,
+            nn_ana=None,
         )
         self.ust.save()
         self.jour.log("asm_ogren_dongu", **sonuc)
@@ -1432,6 +1472,20 @@ class Organism:
             mood_beden_baski=getattr(self.drives, "mood", {}).get("beden_baski", 0),
         )
         self.mind.save(self.brain_path)
+        try:
+            # state["ticks"] her başlatmada sıfırlanır: zamanlama gerçek saate bağlı tikle yapılır
+            _oz_tik = (self.oz.zaman_tiki() if hasattr(self.oz, "zaman_tiki")
+                       else int(self.state.get("ticks") or 0))
+            _olcum = self.oz.olc(_oz_tik) if hasattr(self.oz, "olc") else None
+            if _olcum:
+                self.jour.log("oz_hedef_olcum", **_olcum)
+            _yansima = self.oz.yansima(_oz_tik) if hasattr(self.oz, "yansima") else None
+            if _yansima:
+                self.jour.log("oz_hedef_yansima", **_yansima)
+            if hasattr(self.oz, "kaydet"):
+                self.oz.kaydet()
+        except Exception as _e:
+            self.jour.log("oz_hedef_kayit_hata", hata=str(_e)[:200])
         self.jour.log("oz_hedef", **self.oz.durum())
         _oz_h = self.oz.mevcut_hedef()
         if _oz_h:
@@ -1523,9 +1577,21 @@ class Organism:
 
     # ------------------------------------------------------------------ yardimcilar
 
+    def _surpriz_ust(self) -> float:
+        """IDX_SURPRIZ girdisi (topla_sinyalleri ÷5 ile [0,1]'e çevirir).
+
+        Atölyenin merakı alt sınır olarak kalır; üstüne dünya-ΔS modelinin tahmin hatası
+        (önceki tikte UYGULANAN hamlenin beklenen vs gerçek Δz farkı, 1 tik gecikmeli) biner.
+        cfg["surpriz_dunya_delta"]=False ile yalnızca atölye değeri kullanılır.
+        """
+        atolye = float(getattr(self.atolye, "model", {}).get("surpriz", 0.0))
+        if not getattr(self.ust, "surpriz_dunya_delta", False):
+            return atolye
+        return max(atolye, 5.0 * float(getattr(self.ust, "son_surpriz", 0.0)))
+
     def _topla_sinyal_ust(self) -> List[float]:
         """Üst beyin (MLP) için SINYAL_BOYUT'luk numeric vektör döndürür."""
-        import ust_beyn as ust_beyn_mod
+        import noral_beyn as ust_beyn_mod
         import queue
         door_msgs = []
         try:
@@ -1552,7 +1618,7 @@ class Organism:
         _bellek_baski = max(0.0, (self.drives.bellek_yuzde - 80.0) / 20.0)
         _beden_baski = max(_disk_baski, _bellek_baski)
 
-        return ust_beyn_mod.topla_sinyalleri(
+        s_t = ust_beyn_mod.topla_sinyalleri(
             drives=self.drives,
             mind=self.mind,
             dam=self.dam,
@@ -1567,12 +1633,13 @@ class Organism:
             sarsinti=0.0,
             yemek_var=self._yemek_var_ust,
             gorev_aktif=bool(self.hedef_tip),
-            surpriz=getattr(self.atolye, "model", {}).get("surpriz", 0.0),
+            surpriz=self._surpriz_ust(),
             dunya_bozuk=False,
             olum_feats=None,
             cpu_yuk=_cpu.get("cpu_yuk", 0.0),
             proses_norm=_proses.get("proses_norm", 0.0),
             disk_yuzde_norm=self.drives.disk_yuzde / 100.0,
+            mesaj_var=1.0 if door_msgs else 0.0,
             bellek_yuzde_norm=self.drives.bellek_yuzde / 100.0,
             usb_cihaz_norm=min(1.0, self.drives.usb_cihaz_sayisi / 50.0),
             usb_keşif_bonusu=self.drives.usb_keşif_bonusu,
@@ -1583,6 +1650,15 @@ class Organism:
             bellek_baski=_bellek_baski,
             beden_baski=_beden_baski,
         )
+        # Dönen vektör HAM S_t'dir: dusunme / nn_ana / ust.sec / kavram hafızası eski
+        # 48 boyutlu sözleşmeyi görür. ΔS ve E_{t-1} beyinde ayrı kanal olarak hesaplanır.
+        _zg = getattr(self.ust, "zamansal_guncelle", None)
+        if _zg is not None:
+            try:
+                _zg(s_t)
+            except Exception as _e:
+                self.jour.log("zamansal_guncelle_hata", hata=str(_e))
+        return s_t
 
     def _topla_sinyal(self) -> str:
         """Pipe-ayrılmış sinyal stringi döndürür (brain.stimulus() ile uyumlu)."""

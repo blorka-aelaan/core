@@ -1,0 +1,13 @@
+{
+  "_aciklama": "Mevcut ag_kapsam.json'unun ÜSTÜNE şu anahtarları ekle (diğerlerine dokunma). cevre_modu: true -> arp-scan + olay güdümlü tarama. Değişiklik anında geçerli.",
+  "cevre_modu": true,
+  "arp_aralik_sn": 300,
+  "arp_retry": 2,
+  "arp_timeout_ms": 200,
+  "arp_sudo": false,
+  "arp_arayuz": null,
+  "is_saatlik_azami": 20,
+  "tam_bekleme_sn": 1800,
+  "nmap_hiz": 200,
+  "kok_tarama": false
+}

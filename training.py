@@ -21,7 +21,7 @@ import time
 import numpy as np
 from pathlib import Path
 
-from ust_beyn import SINYAL_SURUMU
+from noral_beyn import SINYAL_SURUMU
 
 
 class SelfTrainer:

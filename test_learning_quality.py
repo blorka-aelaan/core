@@ -10,7 +10,7 @@ import brain
 import home_world
 import organism as organism_mod
 import reward
-import ust_beyn
+import noral_beyn as ust_beyn
 from dusunme import Dusunme
 from training import SelfTrainer
 
@@ -203,9 +203,13 @@ def test_task_and_previous_action_context():
 def test_legacy_upper_model_migration():
     with tempfile.TemporaryDirectory(prefix="core_ust_model_") as tmp:
         root = Path(tmp)
-        legacy = ust_beyn.UstBeyn({}, root=root, seed=3)
-        legacy.mlp.W1.fill(0.0)
-        legacy.mlp.W1[:, ust_beyn.IDX_ENERJI] = 2.0
+        legacy = ust_beyn.NöralUstBeyn({}, root=root, seed=3)
+        # Pure-Python NöralBeyn: W1 = ağırlıklar[0] (liste), NumPy yok.
+        legacy.mlp.ağırlıklar[0] = [
+            [0.0 for _ in row] for row in legacy.mlp.ağırlıklar[0]
+        ]
+        for row in legacy.mlp.ağırlıklar[0]:
+            row[ust_beyn.IDX_ENERJI] = 2.0
         legacy.save()
 
         model_path = root / "zeka" / "ust_beyn.json"
@@ -213,10 +217,10 @@ def test_legacy_upper_model_migration():
         data["surum"] = 2
         model_path.write_text(json.dumps(data), encoding="utf-8")
 
-        migrated = ust_beyn.UstBeyn({}, root=root, seed=3)
+        migrated = ust_beyn.NöralUstBeyn({}, root=root, seed=3)
         assert all(
-            weight == 6.0
-            for weight in migrated.mlp.W1[:, ust_beyn.IDX_ENERJI]
+            row[ust_beyn.IDX_ENERJI] == 6.0
+            for row in migrated.mlp.ağırlıklar[0]
         )
     print("Eski üst-beyin enerji ağırlıkları ölçek eşdeğerliğiyle taşındı")
 

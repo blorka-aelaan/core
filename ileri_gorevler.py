@@ -76,13 +76,13 @@ ILERI_GOREVLER = [
         "aciklama": "[rbx] adresine sabit 10 yaz ve rcx'e oku (pointer dereference)",
         "seviye": 2, "azami_komut": 2, "butce": 80000,
         "training": [
-            {"input": {"rbx": 64,  "rcx": 0}, "output": {"rcx": 10}},
-            {"input": {"rbx": 128, "rcx": 5}, "output": {"rcx": 10}},
-            {"input": {"rbx": 256, "rcx": 9}, "output": {"rcx": 10}},
+            {"input": {"rbx": 64,  "rcx": 0}, "output": {"rcx": 10, "bellek": {64: 10}}},
+            {"input": {"rbx": 128, "rcx": 5}, "output": {"rcx": 10, "bellek": {128: 10}}},
+            {"input": {"rbx": 256, "rcx": 9}, "output": {"rcx": 10, "bellek": {256: 10}}},
         ],
         "validation": [
-            {"input": {"rbx": 512,  "rcx": 1}, "output": {"rcx": 10}},
-            {"input": {"rbx": 1024, "rcx": 7}, "output": {"rcx": 10}},
+            {"input": {"rbx": 512,  "rcx": 1}, "output": {"rcx": 10, "bellek": {512: 10}}},
+            {"input": {"rbx": 1024, "rcx": 7}, "output": {"rcx": 10, "bellek": {1024: 10}}},
         ]
     },
     {
@@ -90,13 +90,13 @@ ILERI_GOREVLER = [
         "aciklama": "rax değerini [rbx] adresine yaz, [rbx] adresinden rcx'e oku ve artır",
         "seviye": 2, "azami_komut": 3, "butce": 120000,
         "training": [
-            {"input": {"rax": 15, "rbx": 64},  "output": {"rcx": 16}},
-            {"input": {"rax": 40, "rbx": 128}, "output": {"rcx": 41}},
-            {"input": {"rax": 0,  "rbx": 256}, "output": {"rcx": 1}},
+            {"input": {"rax": 15, "rbx": 64},  "output": {"rcx": 16, "bellek": {64: 15}}},
+            {"input": {"rax": 40, "rbx": 128}, "output": {"rcx": 41, "bellek": {128: 40}}},
+            {"input": {"rax": 0,  "rbx": 256}, "output": {"rcx": 1,  "bellek": {256: 0}}},
         ],
         "validation": [
-            {"input": {"rax": 99, "rbx": 512}, "output": {"rcx": 100}},
-            {"input": {"rax": 7,  "rbx": 32},  "output": {"rcx": 8}},
+            {"input": {"rax": 99, "rbx": 512}, "output": {"rcx": 100, "bellek": {512: 99}}},
+            {"input": {"rax": 7,  "rbx": 32},  "output": {"rcx": 8,  "bellek": {32: 7}}},
         ]
     },
     {
@@ -104,13 +104,13 @@ ILERI_GOREVLER = [
         "aciklama": "rax -> [rcx], rbx -> [rdx] yaz, sonra bellekten okuyup topla",
         "seviye": 2, "azami_komut": 4, "butce": 180000,
         "training": [
-            {"input": {"rax": 10, "rbx": 25, "rcx": 64,  "rdx": 128}, "output": {"rax": 35}},
-            {"input": {"rax": 7,  "rbx": 8,  "rcx": 256, "rdx": 512}, "output": {"rax": 15}},
-            {"input": {"rax": 50, "rbx": 50, "rcx": 32,  "rdx": 96},  "output": {"rax": 100}},
+            {"input": {"rax": 10, "rbx": 25, "rcx": 64,  "rdx": 128}, "output": {"rax": 35, "bellek": {64: 10, 128: 25}}},
+            {"input": {"rax": 7,  "rbx": 8,  "rcx": 256, "rdx": 512}, "output": {"rax": 15, "bellek": {256: 7, 512: 8}}},
+            {"input": {"rax": 50, "rbx": 50, "rcx": 32,  "rdx": 96},  "output": {"rax": 100, "bellek": {32: 50, 96: 50}}},
         ],
         "validation": [
-            {"input": {"rax": 12, "rbx": 30, "rcx": 16,  "rdx": 48},  "output": {"rax": 42}},
-            {"input": {"rax": 3,  "rbx": 9,  "rcx": 80,  "rdx": 160}, "output": {"rax": 12}},
+            {"input": {"rax": 12, "rbx": 30, "rcx": 16,  "rdx": 48},  "output": {"rax": 42, "bellek": {16: 12, 48: 30}}},
+            {"input": {"rax": 3,  "rbx": 9,  "rcx": 80,  "rdx": 160}, "output": {"rax": 12, "bellek": {80: 3, 160: 9}}},
         ]
     },
 

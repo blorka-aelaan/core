@@ -56,7 +56,7 @@ BEYAZ = ("which", "file", "find", "ls", "wc", "grep", "head", "tail",
          "stat", "du", "dpkg", "apt-cache", "ps", "pgrep", "systemctl",
          "ip", "df", "zcat", "nmap", "ping", "ss", "curl",
          # Yeni ağ keşif komutları (salt-okunur):
-         "traceroute", "host", "whois", "ifconfig", "arp",
+         "traceroute", "host", "whois", "ifconfig", "arp", "arp-scan",
          # talep.py hazir BEYAZ adayları (judge_var=True) — sistemde var,
          # kurulum gerekmez; yalnızca _harita + _dogrula eklenir
          "nstat", "lnstat", "netstat", "resolveip",
@@ -89,6 +89,11 @@ AG_VARSAYILAN = {
     "ping_paket": 2,               # -c
     "ping_bekle_sn": 1,            # -W (her yanıtlama bekleme, sn)
     "ayni_hedef_aralik_sn": 15,    # aynı host'a soğuma
+    "nmap_taramalar": ("-sn", "-sS", "-sT", "-sU", "-sV", "-O", "-A", "-sN", "-sF", "-sX", "-Pn"),
+    "nmap_port_araliklari": ("1-1000", "1-100", "20-25,53,80,110,139,443,445,3389,3306,5432,6379,8080,8443"),
+    "nmap_top_ports": ("10", "50", "100"),
+    "nmap_ogrenme_dosya": "zeka/nmap_ogren.json",
+    "AG_TARA_ARALIK_SN": 1800,  # 30 dakika
 }
 
 # ---------- BENI_TARA (Katman 1+2): kendini bil ----------
@@ -109,11 +114,12 @@ BENI_KOMUT_SURE = 20          # saniye; nmap --host-timeout'undan büyük olmal�
 
 # find/grep'in gezeceği güvenli kökler (sanal FS ve ağ yok).
 GUVENLI_KOKLER = ("/usr/bin", "/usr/sbin", "/etc", "/usr/share/doc",
-                  "/home/emrah/Genel/core/world")
+                  "/home/emrah/Genel/core/world",
+                  "/var/log", "/opt", "/srv", "/home")
 
 SERVIS_ONBELLEK_SN = 300   # servis listesi yenileme aralığı
 
-ZAMAN_ASIMI = 8        # komut zaman aşımı (saniye)
+ZAMAN_ASIMI = 15       # komut zaman aşımı (saniye)
 ODUL = 6.0             # hedefi karşılayan komut ödülü
 ODUL_HELP = 4.0        # komutun --help'ından ne işe yaradığını öğrenme ödülü
 MALIYET = 0.5          # her deneme bedava değil
@@ -121,7 +127,7 @@ MALIYET = 0.5          # her deneme bedava değil
 # beyne ek ceza. gain = -KAPI_CEZA → hem enerji düşer hem reward
 # negatifleşir: "bu kapıya bir daha yaklaşma" için çift sinyal.
 # Yalnızca engel=True (yasaklı) için; atlandi (mod atlaması) cezasızdır.
-KAPI_CEZA = 5.0
+KAPI_CEZA = 0.0
 # zincir hedeflerinde ara veri ödülü (Aşama 2). MALIYET'ten yüksek
 # OLMALI: eski 1.0, bedel sonrası net −1.0 yapıyordu → veri üreten doğru
 # ilk adım (ps → wc) cezalandırılıyor, beyin ondan kaçıyordu (zincir %7).
@@ -219,6 +225,16 @@ class Kullan:
         self._ag_kapsam_damga = None   # (mtime_ns, boyut); yoksa None
         self._ag_son = {}          # ip → son hedef kurulumu (soğuma)
         self._ag_denemeleri = {}   # ip → kaç kez hedef oldu (least-tried)
+        # Bilinen cihazlar: {ip: {"mac": ..., "son_tarama": ..., "anormal": bool}}
+        self._ag_bilinen_cihazlar = {}
+        # Nmap kuyruğu: [{"ip": ..., "flags": [...], "tarama_tipi": ...}, ...] (IP sıralı)
+        self._ag_nmap_kuyrugu = []
+        # Son arp-scan zamanı
+        self._ag_arp_scan_zamani = 0.0
+        # Nmap öğrenme belleği: {ip: {scan_tipi: {open_ports: [...], services: {...}, os: "..."}}}
+        self._nmap_ogrenme = {}
+        self._nmap_ogrenme_yol = self.root / AG_VARSAYILAN["nmap_ogrenme_dosya"]
+        self._nmap_ogrenme_yukle()
         # BENI_TARA: keşif uzayı port aralığı (aynı sayım mekanizması)
         self._ben_son = {}         # aralık → son hedef kurulumu (soğuma)
         self._ben_denemeleri = {}  # aralık → kaç kez hedef oldu (least-tried)
@@ -226,8 +242,8 @@ class Kullan:
         #   "bu komutu çalıştırırsam ölürüm mü?" → engelle / ceza / çalıştır
         self._komut_tehlike = komut_tehlike_mod.KomutTehlike()
         self._komut_tehlike.load()
-        self._komut_tehlike_esik = 0.80   # bu üzeri komut engellenir
-        self._komut_tehlike_ceza_esik = 0.50  # bu üzeri ceza verilir (ama çalıştırılır)
+        self._komut_tehlike_esik = 0.95   # bu üzeri komut -10 ceza (az komut)
+        self._komut_tehlike_ceza_esik = 0.80  # bu üzeri komut -5 ceza (az komut)
         # Hedef+komut maskeleme: aynı (tip, komut) 3 kez başarısız olursa
         # MASKE_SURE saniye boyunca yeniden denenmez.
         self._maske = {}          # (hedef_tip, komut) -> expiry timestamp
@@ -923,6 +939,50 @@ class Kullan:
         kapsam["izin"] = izin
         return kapsam
 
+    def _nmap_ogrenme_yukle(self):
+        """Nmap öğrenme belleğini diske yükler."""
+        try:
+            ham = json.loads(self._nmap_ogrenme_yol.read_text(encoding="utf-8"))
+            if isinstance(ham, dict):
+                self._nmap_ogrenme = ham
+        except (OSError, ValueError, TypeError):
+            self._nmap_ogrenme = {}
+
+    def _nmap_ogrenme_kaydet(self):
+        """Nmap öğrenme belleğini diske yazar."""
+        try:
+            self._nmap_ogrenme_yol.write_text(
+                json.dumps(self._nmap_ogrenme, ensure_ascii=False, indent=1),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    def _nmap_ogrenme_guncelle(self, ip, scan_tipi, cikti):
+        """Nmap çıktısını öğrenme belleğine kaydeder ve döndürür."""
+        if ip not in self._nmap_ogrenme:
+            self._nmap_ogrenme[ip] = {}
+        kayit = {"scan_tipi": scan_tipi, "cikti_ozet": cikti[:500]}
+        portlar = re.findall(r"^(\d+)/(tcp|udp)\s+(\S+)", cikti, re.M)
+        open_ports = []
+        services = {}
+        for port, proto, durum in portlar:
+            if durum == "open":
+                open_ports.append(int(port))
+                services[str(port)] = durum
+        kayit["open_ports"] = open_ports
+        kayit["services"] = services
+        os_match = re.search(r"OS details:\s*(.+)", cikti)
+        if os_match:
+            kayit["os"] = os_match.group(1).strip()
+        servis_match = re.findall(r"^(\d+)/(tcp|udp)\s+open\s+(.+)", cikti, re.M)
+        for port, proto, versiyon in servis_match:
+            services[str(port)] = versiyon.strip()
+        kayit["services"] = services
+        self._nmap_ogrenme[ip][scan_tipi] = kayit
+        self._nmap_ogrenme_kaydet()
+        return kayit
+
     def _ag_kapali(self):
         """Kapsam reddediyorsa AG_TARA ne üretilir ne de kazanır.
 
@@ -1076,37 +1136,31 @@ class Kullan:
         return portlar
 
     def _h_ag_tara(self):
-        """AG_TARA — kapsam içindeki bir host ('bu host canlı mı?').
+        """AG_TARA — kapsam içinden hedef IP seçer (nmap/ping/ip/traceroute).
 
-        Aday seçimi: allowlist ∩ soğuma yok ∩ AZ DENENMİŞ (count-based
-        keşif — elle yazılmış dal yok). komsu_var: 'ip neigh' kapısı
-        yalnızca komşu satırı VARKEN açılır (DOSYA_OKU örnek kapısı
-        gibi) — kanıtsız kapı hiç sorulmaz. Gerçek gerçeklik hedefe
-        gömülmez; _dogrula anında kernel'den okur.
+        Kapsam IP'lerinden ayni_hedef_aralik_sn cooldown'u geçmiş ve
+        az-denenmiş öncelikle bir IP seçer. komsu_var True olduğunda
+        'ip' (ARP komşu kanıtı) kapısı da açılır.
+
+        Döner: {"tip": "AG_TARA", "ip": ip, "komsu_var": bool} veya None.
         """
         if self._ag_kapali():
             return None
-        try:
-            simdi = time.time()
-            aralik = float(self._ag_kapsam.get(
-                "ayni_hedef_aralik_sn", AG_VARSAYILAN["ayni_hedef_aralik_sn"]))
-            adaylar = [ip for ip in self._ag_adaylar()
-                       if self._ag_ip_izinli(ip)
-                       and simdi - self._ag_son.get(ip, 0.0) >= aralik]
-            if not adaylar:
-                return None
-            az = min(self._ag_denemeleri.get(ip, 0) for ip in adaylar)
-            havuz = [ip for ip in adaylar
-                     if self._ag_denemeleri.get(ip, 0) == az]
-            ip = random.choice(havuz)
-        except (ValueError, KeyError, TypeError):
+        simdi = time.time()
+        aralik_sn = float(self._ag_kapsam.get(
+            "ayni_hedef_aralik_sn", AG_VARSAYILAN["ayni_hedef_aralik_sn"]))
+        adaylar = [ip for ip in self._ag_adaylar()
+                   if simdi - self._ag_son.get(ip, 0.0) >= aralik_sn]
+        if not adaylar:
             return None
+        az = min(self._ag_denemeleri.get(ip, 0) for ip in adaylar)
+        havuz = [ip for ip in adaylar
+                 if self._ag_denemeleri.get(ip, 0) == az]
+        ip = random.choice(havuz)
         self._ag_son[ip] = simdi
         self._ag_denemeleri[ip] = self._ag_denemeleri.get(ip, 0) + 1
-        komsu = False
-        if not ipaddress.ip_address(ip).is_loopback:
-            komsu = self._ag_komsu_satiri(ip) is not None
-        return {"tip": "AG_TARA", "ip": ip, "komsu_var": komsu}
+        komsu_var = self._ag_komsu_satiri(ip) is not None
+        return {"tip": "AG_TARA", "ip": ip, "komsu_var": komsu_var}
 
     def _h_beni_tara(self):
         """BENI_TARA — kendini tarama (Katman 1: port/servis keşfi).
@@ -1373,33 +1427,33 @@ class Kullan:
     # ---------- komut tehlike profili yardımcıları ----------
 
     _ZARAR_TABLO = {
-        "rm": ("dosya_silme", -60, 0.9),
-        "rmdir": ("dosya_silme", -40, 0.6),
-        "dd": ("disk_yazma", -80, 0.95),
-        "mkfs": ("dosya_sistemi", -100, 1.0),
-        "fdisk": ("disk_bolumleme", -70, 0.85),
-        "mount": ("dosya_sistemi", -30, 0.4),
-        "umount": ("dosya_sistemi", -30, 0.4),
-        "shutdown": ("sistem_kontrolu", -100, 1.0),
-        "reboot": ("sistem_kontrolu", -100, 1.0),
-        "init": ("sistem_kontrolu", -90, 0.9),
-        "halt": ("sistem_kontrolu", -100, 1.0),
-        "poweroff": ("sistem_kontrolu", -100, 1.0),
-        "insmod": ("cekirdek_modulu", -70, 0.8),
-        "modprobe": ("cekirdek_modulu", -60, 0.7),
-        "rmmod": ("cekirdek_modulu", -70, 0.8),
-        "chmod": ("izin_degistirme", -40, 0.5),
-        "chown": ("izin_degistirme", -40, 0.5),
-        "kill": ("surec_sonlandirma", -50, 0.7),
-        "pkill": ("surec_sonlandirma", -50, 0.7),
-        "killall": ("surec_sonlandirma", -50, 0.7),
-        "iptables": ("ag_güvenliği", -60, 0.6),
-        "docker": ("konteyner", -50, 0.6),
+        "rm": ("dosya_silme", -20, 0.3),
+        "rmdir": ("dosya_silme", -15, 0.3),
+        "dd": ("disk_yazma", -30, 0.4),
+        "mkfs": ("dosya_sistemi", -40, 0.5),
+        "fdisk": ("disk_bolumleme", -25, 0.4),
+        "mount": ("dosya_sistemi", -10, 0.2),
+        "umount": ("dosya_sistemi", -10, 0.2),
+        "shutdown": ("sistem_kontrolu", -40, 0.4),
+        "reboot": ("sistem_kontrolu", -40, 0.4),
+        "init": ("sistem_kontrolu", -30, 0.3),
+        "halt": ("sistem_kontrolu", -40, 0.4),
+        "poweroff": ("sistem_kontrolu", -40, 0.4),
+        "insmod": ("cekirdek_modulu", -20, 0.3),
+        "modprobe": ("cekirdek_modulu", -20, 0.3),
+        "rmmod": ("cekirdek_modulu", -20, 0.3),
+        "chmod": ("izin_degistirme", -15, 0.2),
+        "chown": ("izin_degistirme", -15, 0.2),
+        "kill": ("surec_sonlandirma", -15, 0.3),
+        "pkill": ("surec_sonlandirma", -15, 0.3),
+        "killall": ("surec_sonlandirma", -15, 0.3),
+        "iptables": ("ag_güvenliği", -20, 0.2),
+        "docker": ("konteyner", -20, 0.2),
         "curl": ("ag_islemi", -10, 0.1),
         "wget": ("ag_islemi", -10, 0.1),
-        "nc": ("ag_islemi", -30, 0.3),
-        "ncat": ("ag_islemi", -30, 0.3),
-        "tee": ("yazma_islemi", -20, 0.2),
+        "nc": ("ag_islemi", -15, 0.2),
+        "ncat": ("ag_islemi", -15, 0.2),
+        "tee": ("yazma_islemi", -10, 0.1),
     }
 
     def _zarar_tipi(self, komut):
@@ -1869,19 +1923,72 @@ class Kullan:
             return h["surum"] in cikti
 
         if tip == "AG_TARA":
+            hedef_tip = h.get("hedef_tip", "")
+            if hedef_tip == "arp-scan":
+                # arp-scan çıktısı: "IP adresi    MAC adresi    Cihaz"
+                # Her satır bir cihaz: parse et, bilinenler listesine ekle,
+                # yeni cihazlar için nmap kuyruğuna ekle.
+                yeni_cihazlar = []
+                for satir in cikti.splitlines():
+                    parca = satir.split()
+                    if len(parca) >= 2:
+                        ip_c = parca[0]
+                        mac_c = parca[1]
+                        try:
+                            ipaddress.ip_address(ip_c)
+                        except ValueError:
+                            continue
+                        if ip_c not in self._ag_bilinen_cihazlar:
+                            self._ag_bilinen_cihazlar[ip_c] = {
+                                "mac": mac_c,
+                                "son_tarama": 0.0,
+                                "anormal": False,
+                            }
+                            yeni_cihazlar.append(ip_c)
+                # Yeni cihazları IP'ye göre sırala, nmap kuyruğuna ekle
+                for ip_c in sorted(yeni_cihazlar,
+                                   key=lambda x: tuple(int(p) for p in x.split("."))):
+                    self._ag_nmap_kuyrugu.append({
+                        "ip": ip_c,
+                        "flags": ["-sS", "-sV", "-O", "-n", "--host-timeout", "10s"],
+                        "tarama_tipi": "-sS -sV -O",
+                    })
+                # arp-scan her zaman başarılı sayılır (cihaz listesi döndüyse)
+                return len(yeni_cihazlar) > 0 or "arp-scan" in cikti.lower() or len(cikti.strip()) > 0
+
+            if hedef_tip == "nmap":
+                ip = h.get("ip", "")
+                tarama_tipi = h.get("tarama_tipi", "")
+                if not self._ag_ip_izinli(ip):
+                    return False
+                # Nmap çıktısını öğrenme belleğine kaydet
+                self._nmap_ogrenme_guncelle(ip, tarama_tipi, cikti)
+                # Doğrulama: nmap çıktısı geçerli mi?
+                if "Nmap done" not in cikti and "Nmap scan report" not in cikti:
+                    return False
+                # Host up/down kontrolü
+                if "Host is up" in cikti:
+                    return re.search(r"\b" + re.escape(ip) + r"\b", cikti) is not None
+                if "Host seems down" in cikti or "0 hosts up" in cikti:
+                    return True  # ölü host da geçerli sonuç
+                # Port tarama çıktısı var mı?
+                if re.search(r"^\d+/(tcp|udp)\s+", cikti, re.M):
+                    return True
+                return False
+
+            # Eski geriye uyumluluk: direkt nmap/ping/ip/traceroute
             ip = h.get("ip", "")
             if not self._ag_ip_izinli(ip):
-                return False   # kapsam dışı: asla kazanamaz (kapı da kapalı)
-            gercek = self._ag_gercek(ip)   # judge-time zemin gerçeği
+                return False
+            gercek = self._ag_gercek(ip)
             if gercek is None:
-                return False   # kanıt yok → emin olunmadan kazanç yok
+                return False
             argv0 = (argv or [None])[0]
             if argv0 == "nmap":
                 if gercek:
                     return ("Host is up" in cikti
                             and re.search(r"\b" + re.escape(ip) + r"\b",
                                           cikti) is not None)
-                # ölü host'ta ip yazılmayabilir: kanıt "0 hosts up"
                 return ("Host seems down" in cikti
                         or "0 hosts up" in cikti)
             if argv0 == "ping":
@@ -1891,9 +1998,6 @@ class Kullan:
                 return ("0 received" in cikti
                         or "100% packet loss" in cikti)
             if argv0 == "ip":
-                # kapı yalnızca komşu satırı varken açıldı; satır GERÇEĞİ
-                # yansıtmalı — aynı tablonun kendisi (SERVIS_SOR'daki
-                # is-active ile aynı tasarım: öğretmen = kapının kaynağı)
                 satir = next((s for s in cikti.splitlines()
                               if s.strip().startswith(ip + " ")), None)
                 if not satir:
@@ -1904,7 +2008,6 @@ class Kullan:
                             and any(d in par for d in AG_CANLI_DURUMLAR))
                 return any(d in par for d in AG_OLU_DURUMLAR)
             if argv0 == "traceroute":
-                # traceroute: hedef IP çıktıda geçmeli (en az bir hop)
                 return ip in cikti
             return False
 

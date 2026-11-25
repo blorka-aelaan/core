@@ -36,7 +36,7 @@ import training as training_mod
 import uyku as uyku_mod
 import uzuv as uzuv_mod
 import zeka
-import ust_beyn as ust_beyn_mod
+import noral_beyn as ust_beyn_mod
 import oz_hedef as oz_hedef_mod
 import dusunme as dusunme_mod
 import reward as reward_mod
@@ -218,7 +218,7 @@ def main() -> None:
 
     # Üst (genel) beyin
     try:
-        ust = ust_beyn_mod.UstBeyn(cfg, root=ROOT, seed=args.seed)
+        ust = ust_beyn_mod.NöralUstBeyn(cfg, root=ROOT, seed=args.seed)
         jour.log("ust_beyn_load", samples=ust.samples)
     except Exception as _e:
         _modul_hatalari.append("ust_beyn")
